@@ -630,6 +630,40 @@ pub fn show_processing_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing");
 }
 
+/// How long a voice command's result stays on screen.
+const COMMAND_RESULT_DURATION: std::time::Duration = std::time::Duration::from_millis(1600);
+
+#[derive(Clone, serde::Serialize)]
+struct CommandResultEvent {
+    label: String,
+    ok: bool,
+}
+
+/// Briefly shows what a voice command did (or that it failed) in place of the
+/// working state, then hides the overlay unless a new session has shown it.
+pub fn show_command_overlay(app_handle: &AppHandle, label: String, ok: bool) {
+    if settings::get_settings(app_handle).overlay_style == OverlayStyle::None {
+        return;
+    }
+    let handle = app_handle.clone();
+    let _ = app_handle.run_on_main_thread(move || {
+        // The label goes first so the overlay has it when the state switches.
+        let _ = handle.emit_to(
+            "recording_overlay",
+            "command-result",
+            CommandResultEvent { label, ok },
+        );
+        show_overlay_state_on_main(&handle, "command");
+        let shown = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            std::thread::sleep(COMMAND_RESULT_DURATION);
+            if OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst) == shown {
+                hide_recording_overlay(&handle);
+            }
+        });
+    });
+}
+
 /// Updates the overlay window position based on current settings
 pub fn update_overlay_position(app_handle: &AppHandle) {
     // Positioning queries monitors/cursor (GDK/Xlib on Linux) and moves the
