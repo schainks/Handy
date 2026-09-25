@@ -14,6 +14,7 @@
     "models": "模型",
     "advanced": "進階",
     "postProcessing": "後處理",
+    "voiceCommands": "Voice Commands",
     "history": "歷史紀錄",
     "debug": "偵錯",
     "about": "關於"
@@ -270,6 +271,10 @@
         "label": "實驗性功能",
         "description": "啟用仍在開發中的實驗性功能"
       },
+      "voiceCommandsToggle": {
+        "label": "Voice Commands",
+        "description": "Let Jev decide whether a short dictation is an instruction for your Mac, such as \"open Safari\" or \"turn it up\", and run it instead of pasting it. Dictations of 25 words or fewer are sent to TypeSafe's API to decide. macOS only."
+      },
       "lazyStreamClose": {
         "label": "在轉錄之間保持麥克風開啟",
         "description": "錄音停止後保持麥克風串流開啟30秒，減少連續轉錄時的延遲。啟用時可能會降低藍牙音訊品質。"
@@ -452,6 +457,41 @@
         "cancel": "取消",
         "selectToEdit": "選擇上方的提示詞以檢視和編輯其詳細資訊",
         "createFirst": "點選上方的「建立新提示詞」來建立您的第一個後處理提示詞"
+      }
+    },
+    "voiceCommands": {
+      "groups": {
+        "jev": "Jev",
+        "actions": "Actions"
+      },
+      "unsupported": "Voice commands control your Mac through macOS automation and are only available on macOS.",
+      "apiKey": {
+        "title": "TypeSafe API Key",
+        "description": "Key for Jev, TypeSafe's System One API. When empty, the TYPESAFE_API_KEY environment variable is used.",
+        "placeholder": "Paste your TypeSafe API key",
+        "missing": "Add a TypeSafe API key to start using voice commands. Until then, everything you say is pasted as dictation."
+      },
+      "model": {
+        "title": "Jev Model",
+        "description": "Versioned Jev model ID. Pinning a version keeps behavior stable until you change it."
+      },
+      "threshold": {
+        "title": "Command Threshold",
+        "description": "How sure Jev must be that you spoke a command before running it. Raise it if dictation gets mistaken for commands; lower it if commands get pasted as text."
+      },
+      "hammerspoon": {
+        "title": "Hammerspoon",
+        "description": "With Hammerspoon's hs command-line tool installed, voice commands can also tile windows and send media keys to any player.",
+        "installed": "Installed",
+        "notInstalled": "Not installed",
+        "setup": "To enable window tiling, install Hammerspoon, add require(\"hs.ipc\") to ~/.hammerspoon/init.lua, reload it, then run hs.ipc.cliInstall() in the Hammerspoon console."
+      },
+      "customCommands": {
+        "title": "Custom Commands",
+        "description": "Add your own commands (AppleScript, Hammerspoon, shell, or a URL) to a JSON file. Changes apply to the next command you speak.",
+        "count": "{{builtin}} built-in, {{custom}} custom",
+        "edit": "Edit",
+        "error": "Your custom commands file was ignored: {{error}}"
       }
     },
     "history": {
