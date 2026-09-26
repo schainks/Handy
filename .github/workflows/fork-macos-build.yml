@@ -28,9 +28,12 @@ jobs:
     with:
       platform: "macos-26"
       target: "aarch64-apple-darwin"
+      # build.yml sets APPLE_CERTIFICATE to "" when not signing, and Tauri
+      # tries to import any defined certificate, so skip signing outright.
       # Updater artifacts must be signed with upstream's private key; skip them.
       build-args: >-
         --target aarch64-apple-darwin
+        --no-sign
         --config '{"bundle":{"createUpdaterArtifacts":false}}'
       sign-binaries: false
       asset-prefix: "handy-unsigned"
