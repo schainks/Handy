@@ -38,3 +38,25 @@ jobs:
       sign-binaries: false
       asset-prefix: "handy-unsigned"
       upload-artifacts: true
+
+  # build.yml's zip also holds a loose Handy.app, which loses its executable
+  # bit in the zip. Publish the .dmg on its own, unzipped, so it downloads as a
+  # plain disk image.
+  dmg:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: handy-unsigned-aarch64-apple-darwin
+      - name: Name the disk image after the commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: mv dmg/*.dmg "Handy-unsigned-${SHA::7}-aarch64.dmg"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: Handy-unsigned-*.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
