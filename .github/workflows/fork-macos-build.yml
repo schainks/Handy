@@ -1,0 +1,37 @@
+name: "macOS Test Build (unsigned)"
+
+# An unsigned Apple Silicon build of each PR on a fork, on GitHub-hosted
+# runners. Upstream's "PR Test Build" signs with Apple, Azure and updater keys
+# that only upstream has, so it fails on forks.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/fork-macos-build.yml"
+
+concurrency:
+  group: fork-macos-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository != 'cjpais/Handy'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: "macos-26"
+      target: "aarch64-apple-darwin"
+      # Updater artifacts must be signed with upstream's private key; skip them.
+      build-args: >-
+        --target aarch64-apple-darwin
+        --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      sign-binaries: false
+      asset-prefix: "handy-unsigned"
+      upload-artifacts: true
