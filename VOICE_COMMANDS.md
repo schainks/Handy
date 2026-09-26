@@ -41,8 +41,9 @@ when no API key is set or when Jev doesn't answer within 2.5 seconds.
 2. In the new **Voice Commands** page, paste a TypeSafe API key. Alternatively, set
    `TYPESAFE_API_KEY` in the environment Handy is launched from.
 3. The first command that uses System Events (keystrokes, hiding apps, dark mode) makes
-   macOS ask whether Handy may control System Events. Allow it. Keystrokes also use the
-   Accessibility permission Handy already has for pasting.
+   macOS ask whether Handy may control System Events. Allow it. Quitting an app, or
+   controlling Spotify or Music without Hammerspoon, asks the same for that app.
+   Keystrokes also use the Accessibility permission Handy already has for pasting.
 4. Optional, for window tiling and media keys: install Hammerspoon.
    - `brew install --cask hammerspoon`, or download it from [hammerspoon.org](https://www.hammerspoon.org).
    - Add `require("hs.ipc")` to `~/.hammerspoon/init.lua` and reload the config.
