@@ -106,20 +106,25 @@ this" or "click here".
 - **By name:** only when you ask to click something, Handy reads the links, buttons, tabs,
   checkboxes and fields visible in the front window, and a second Jev request picks the
   one you named. Links and buttons are pressed through Accessibility, so the pointer
-  doesn't move. Fields get the cursor, ready for dictation. Handy clicks only when Jev is
-  at least 50% sure, and it never reads what's typed in a field.
+  doesn't move. Fields get the cursor, ready for dictation. A field goes by its label or
+  placeholder, or else by its kind, so "click the search box" and "click the password
+  field" find it either way. Handy clicks only when Jev is at least 50% sure, and it never
+  reads what's typed in a field.
 - **Pages:** in a web page, Handy asks for the visible links and controls in one request,
   the way VoiceOver finds links. Safari answers it best. Chrome, Arc and Electron apps
   such as Slack build their page's Accessibility tree only once an app asks for it, which
   Handy does, so the first click there can come up empty.
 - **"Click this":** clicks wherever the pointer already is, without moving it.
 
-Try it on Wikipedia in Safari:
+Try it on Wikipedia in Safari. "Go to …" opens your default browser, so if that isn't
+Safari, open the page in Safari yourself.
 
-1. "go to wikipedia.org"
-2. "click the search box", dictate "octopus", then "press enter"
-3. "click cephalopods", "go back", "open the intelligence section", "click random article"
-4. Point at a picture and say "click this".
+1. "go to wikipedia.org". The search box already has the cursor: "type octopus", then
+   "press enter".
+2. "click cephalopods", then "go back".
+3. "click the anatomy section".
+4. "click the search box", "type squid", then "press enter".
+5. Point at a picture and say "click this".
 
 ## Custom commands
 
@@ -219,8 +224,9 @@ keep Handy fully local.
 - Keystroke actions send standard macOS shortcuts to the frontmost app. Apps with different
   shortcuts won't respond as expected.
 - Some apps, often Electron ones, put little in their menus.
-- Clicking reads the front window's controls and visible page content, but not lists and
-  tables (message lists, file lists). "Click the first result" works only when the result
-  has a name to say.
+- Clicking reads only what's visible in the front window. A link folded into a menu or a
+  collapsed section, such as Wikipedia's ☰ menu, needs that opened first ("click the main
+  menu"). Lists and tables (message lists, file lists) aren't read, and "click the first
+  result" works only when the result has a name to say.
 - Action descriptions are in English, and the History, Bookmarks and Window menus are
   recognized by their English names. Other languages are untested.

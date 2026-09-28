@@ -43,6 +43,16 @@ pub fn kind(role: &str, subrole: &str) -> Option<&'static str> {
     })
 }
 
+/// What to call a text field that has no label or placeholder, so that "click
+/// the search box" or "click the password field" can still find it.
+pub fn unnamed_field(subrole: &str) -> &'static str {
+    match subrole {
+        "AXSearchField" => "search",
+        "AXSecureTextField" => "password",
+        _ => "text",
+    }
+}
+
 /// One line, trimmed, at most `MAX_NAME_CHARS` characters.
 pub fn clean_name(text: &str) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -116,7 +126,7 @@ pub fn click_pointer() -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{clean_name, kind, labels, Clickable};
+    use super::{clean_name, kind, labels, unnamed_field, Clickable};
     use crate::voice_control::ax::{self, Element, AX_API_DISABLED, AX_CANNOT_COMPLETE};
     use log::debug;
     use objc2_core_foundation::{CGPoint, CGSize};
@@ -139,16 +149,12 @@ mod platform {
     /// of items; they aren't walked.
     const SKIPPED_CONTAINERS: &[&str] = &["AXTable", "AXOutline", "AXBrowser", "AXList", "AXGrid"];
 
-    /// The item's name: its title or description, a field's placeholder
-    /// (never what's typed in it), the text inside it, or its value.
+    /// The item's name: its title or description, the label naming it, a
+    /// field's placeholder (never what's typed in it), the text inside it, or
+    /// its value.
     fn name_of(element: &Element, kind: &str) -> String {
-        for attribute in ["AXTitle", "AXDescription"] {
-            if let Some(text) = element.string(attribute) {
-                let text = clean_name(&text);
-                if !text.is_empty() {
-                    return text;
-                }
-            }
+        if let Some(name) = own_name(element).or_else(|| label_of(element)) {
+            return name;
         }
         if kind == "field" {
             return element
@@ -158,14 +164,7 @@ mod platform {
         }
         // A link's words are usually text elements inside it; its own value
         // can be its address.
-        let words: Vec<String> = element
-            .children()
-            .into_iter()
-            .take(4)
-            .filter(|child| child.role() == "AXStaticText")
-            .filter_map(|child| child.string("AXValue"))
-            .collect();
-        let words = clean_name(&words.join(" "));
+        let words = static_text(element);
         if !words.is_empty() {
             return words;
         }
@@ -175,13 +174,61 @@ mod platform {
             .unwrap_or_default()
     }
 
-    /// The item's kind and name, if it's something to click and has a name.
+    /// The element's title, or else its description.
+    fn own_name(element: &Element) -> Option<String> {
+        ["AXTitle", "AXDescription"]
+            .into_iter()
+            .find_map(|attribute| {
+                element
+                    .string(attribute)
+                    .map(|text| clean_name(&text))
+                    .filter(|text| !text.is_empty())
+            })
+    }
+
+    /// The text of the HTML <label> naming a form control. WebKit points to
+    /// the label rather than repeating it in the control's title. Only the
+    /// label's own text is read: a label can wrap its field, whose value
+    /// must not be.
+    fn label_of(element: &Element) -> Option<String> {
+        let label = element.element("AXTitleUIElement").ok()??;
+        let text = if label.role() == "AXStaticText" {
+            label
+                .string("AXValue")
+                .map(|text| clean_name(&text))
+                .unwrap_or_default()
+        } else {
+            static_text(&label)
+        };
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The words of the first text elements directly inside `element`.
+    fn static_text(element: &Element) -> String {
+        let words: Vec<String> = element
+            .children()
+            .into_iter()
+            .take(4)
+            .filter(|child| child.role() == "AXStaticText")
+            .filter_map(|child| child.string("AXValue"))
+            .collect();
+        clean_name(&words.join(" "))
+    }
+
+    /// The item's kind and name, if it's something to click. Items other
+    /// than fields need a name to be picked by.
     fn describe(element: &Element) -> Option<(&'static str, String)> {
         let role = element.role();
         let subrole = element.string("AXSubrole").unwrap_or_default();
         let kind = kind(&role, &subrole)?;
         let name = name_of(element, kind);
-        (!name.is_empty()).then_some((kind, name))
+        if !name.is_empty() {
+            Some((kind, name))
+        } else if kind == "field" {
+            Some((kind, unnamed_field(&subrole).to_string()))
+        } else {
+            None
+        }
     }
 
     fn visible_in(frame: Option<(CGPoint, CGSize)>, window: (CGPoint, CGSize)) -> bool {
@@ -387,6 +434,13 @@ mod tests {
         assert_eq!(kind("AXTextField", "AXSearchField"), Some("field"));
         assert_eq!(kind("AXStaticText", ""), None);
         assert_eq!(kind("AXGroup", ""), None);
+    }
+
+    #[test]
+    fn unnamed_fields_are_named_by_kind() {
+        assert_eq!(unnamed_field("AXSearchField"), "search");
+        assert_eq!(unnamed_field("AXSecureTextField"), "password");
+        assert_eq!(unnamed_field(""), "text");
     }
 
     #[test]

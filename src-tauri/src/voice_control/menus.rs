@@ -114,7 +114,7 @@ pub fn commands(menus: &[(String, Vec<RawItem>)]) -> Vec<MenuItem> {
         if title.trim().is_empty() || denied(title) {
             continue;
         }
-        let path = vec![title.clone()];
+        let path = vec![title.trim().to_string()];
         collect(items, &path, is_list_menu(title), &mut out, &mut seen);
     }
     out
@@ -296,6 +296,12 @@ mod platform {
         found
     }
 
+    /// Whether a menu element is the one titled `title` in a command's path,
+    /// which holds titles trimmed.
+    fn titled(element: &Element, title: &str) -> bool {
+        element.title().trim() == title
+    }
+
     /// Press the menu item at `path` in the app with process id `pid`.
     pub fn press(pid: i32, path: &[String]) -> Result<(), String> {
         let bar = menu_bar(pid, PRESS_TIMEOUT_SECS)?;
@@ -304,7 +310,7 @@ mod platform {
             .children()
             .into_iter()
             .skip(1)
-            .find(|element| element.title() == *top_title)
+            .find(|element| titled(element, top_title))
             .ok_or_else(|| format!("the '{top_title}' menu is gone"))?;
         let mut menu = top
             .children()
@@ -315,7 +321,7 @@ mod platform {
             let item = menu
                 .children()
                 .into_iter()
-                .find(|element| element.title() == *title)
+                .find(|element| titled(element, title))
                 .ok_or_else(|| format!("'{title}' is no longer in the menu"))?;
             if index + 1 == rest.len() {
                 return match item.press() {
@@ -502,6 +508,15 @@ mod tests {
             ),
         ]);
         assert_eq!(found, vec!["Edit > Copy"]);
+    }
+
+    #[test]
+    fn titles_are_trimmed_to_match_when_pressed() {
+        let found = labels(&[
+            menu("Apple", vec![]),
+            menu(" View ", vec![leaf(" Show Downloads ")]),
+        ]);
+        assert_eq!(found, vec!["View > Show Downloads"]);
     }
 
     #[test]
