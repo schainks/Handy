@@ -8,8 +8,11 @@
 //! command, or Hammerspoon. Anything that isn't confidently a command, and any
 //! failure to reach Jev, falls through to normal dictation.
 
+#[cfg(target_os = "macos")]
+mod ax;
 mod candidates;
 mod context;
+mod elements;
 mod executor;
 mod jev;
 mod menus;
@@ -27,7 +30,7 @@ use crate::utils::redact_text;
 use executor::Effect;
 use log::{info, warn};
 use once_cell::sync::OnceCell;
-use registry::{Action, ArgKind};
+use registry::{Action, ArgKind, Runner};
 use router::Decision;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -39,6 +42,10 @@ const MAX_COMMAND_WORDS: usize = 25;
 /// Jev answers in about 150-300 ms. Past this, dictation goes ahead without it.
 const JEV_TIMEOUT: Duration = Duration::from_millis(2500);
 pub const DEFAULT_THRESHOLD: f64 = 0.7;
+/// Items at most offered to Jev for one "click …".
+const MAX_CLICK_TARGETS: usize = 200;
+/// How sure Jev must be of the item before it's clicked.
+const MIN_TARGET_CONFIDENCE: f64 = 0.5;
 const CUSTOM_COMMANDS_FILE: &str = "voice_commands.json";
 
 /// One HTTP client for the life of the app: its connection pool keeps the
@@ -215,6 +222,9 @@ pub async fn handle(
             summary: action.title,
             error: Some(reason),
         },
+        Decision::Run { action, .. } if action.runner == Runner::ClickElement => {
+            click_by_name(&client, utterance, &ctx, action).await
+        }
         Decision::Run { action, arg } => {
             let summary = summarize(&action, arg.as_deref());
             let result = tauri::async_runtime::spawn_blocking(move || {
@@ -237,10 +247,70 @@ pub async fn handle(
     }
 }
 
+/// "Click Octopus": read what's clickable in the front window now, ask Jev
+/// which item is meant, and press it.
+async fn click_by_name(
+    client: &jev::Client,
+    utterance: &str,
+    ctx: &DesktopContext,
+    action: Action,
+) -> Outcome {
+    let failed = |error: String| Outcome::Command {
+        summary: action.title.clone(),
+        error: Some(error),
+    };
+    let Some(pid) = ctx.frontmost_pid else {
+        return failed("no app is in front".to_string());
+    };
+    let started = std::time::Instant::now();
+    let items = match tauri::async_runtime::spawn_blocking(move || elements::read(pid)).await {
+        Ok(Ok(items)) if !items.is_empty() => items,
+        Ok(Ok(_)) => return failed("found nothing to click in the front window".to_string()),
+        Ok(Err(e)) => return failed(e),
+        Err(e) => return failed(format!("reading the window failed: {e}")),
+    };
+    let read_ms = started.elapsed().as_millis();
+
+    let names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
+    let offered = elements::shortlist(&names, utterance, MAX_CLICK_TARGETS);
+    let labels: Vec<String> = offered.iter().map(|&i| items[i].label.clone()).collect();
+    let picked = match router::pick_target(client, utterance, ctx, &labels).await {
+        Ok(picked) => picked,
+        Err(e) => return failed(format!("Jev didn't answer: {e}")),
+    };
+    info!(
+        "Click target: {:?} ({:.2}) among {} items on screen, read in {read_ms} ms, {} ms in all",
+        picked.as_ref().map(|(label, _)| redact_text(label)),
+        picked.as_ref().map_or(0.0, |(_, confidence)| *confidence),
+        labels.len(),
+        started.elapsed().as_millis(),
+    );
+
+    let Some((label, confidence)) = picked else {
+        return failed("couldn't tell what to click".to_string());
+    };
+    if confidence < MIN_TARGET_CONFIDENCE {
+        return failed(format!("not sure what to click ({confidence:.2})"));
+    }
+    let Some(index) = labels.iter().position(|l| *l == label).map(|i| offered[i]) else {
+        return failed("couldn't tell what to click".to_string());
+    };
+    let Some(item) = items.into_iter().nth(index) else {
+        return failed("couldn't tell what to click".to_string());
+    };
+    let summary = format!("{} · {}", action.title, item.name);
+    let result = tauri::async_runtime::spawn_blocking(move || elements::press(&item))
+        .await
+        .unwrap_or_else(|e| Err(format!("click task failed: {e}")));
+    Outcome::Command {
+        summary,
+        error: result.err(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use registry::Runner;
 
     fn action(arg: ArgKind) -> Action {
         Action {

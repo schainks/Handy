@@ -62,6 +62,10 @@ pub enum Runner {
     TypeText,
     /// Press the frontmost app's menu item whose label is the argument.
     MenuItem,
+    /// Click the on-screen item Jev picks in a second request, by name.
+    ClickElement,
+    /// Click where the mouse pointer is, without moving it.
+    ClickPointer,
 }
 
 #[derive(Debug, Clone)]
@@ -317,7 +321,7 @@ pub fn builtin(ctx: &DesktopContext) -> Vec<Action> {
             Text,
             Runner::OpenWebsite,
         )
-        .not_for("An application installed on this Mac (open_app)"),
+        .not_for("An application installed on this Mac (open_app), or a link on the current page (click_element)"),
         action(
             "new_tab",
             "New tab",
@@ -366,6 +370,22 @@ pub fn builtin(ctx: &DesktopContext) -> Vec<Action> {
             "Switch to the previous tab",
             none,
             key_code(48, &["control", "shift"]),
+        ),
+        // Clicking in the front window
+        action(
+            "click_element",
+            "Click",
+            "Click, press, open or select something visible in the front window by its name or text: a link, button, tab, checkbox or text field, as in 'click Octopus', 'open the References link', 'press Sign in' or 'click the search box'",
+            none,
+            Runner::ClickElement,
+        )
+        .not_for("A command from the app's menu bar, switching apps, or 'click this' or 'click here' without saying what to click (click_pointer)"),
+        action(
+            "click_pointer",
+            "Click this",
+            "Click whatever is under the mouse pointer, when the user says 'click this', 'click here' or 'click that' without naming it",
+            none,
+            Runner::ClickPointer,
         ),
         // Editing
         action(
@@ -522,7 +542,7 @@ pub fn builtin(ctx: &DesktopContext) -> Vec<Action> {
                 Menu,
                 Runner::MenuItem,
             )
-            .not_for("Something another listed action does directly, such as switching apps, new tab, undo or copy"),
+            .not_for("Something another listed action does directly, such as switching apps, new tab, undo or copy, or a link or button inside the window (click_element)"),
         );
     }
 

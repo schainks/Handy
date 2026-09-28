@@ -15,10 +15,12 @@
 //! the dictation key is how often dictation gets run as a command.
 //!
 //! `live_menu_eval` does the same for menu commands, with Safari, Slack, Mail
-//! and Calendar in front and menus modeled on theirs.
+//! and Calendar in front and menus modeled on theirs. `live_click_eval` runs
+//! "click …" through both requests against Wikipedia's Octopus article.
 
 use super::candidates;
 use super::context::DesktopContext;
+use super::elements;
 use super::jev;
 use super::menus::{self, RawItem};
 use super::registry;
@@ -839,6 +841,183 @@ fn live_menu_eval() {
     latencies.sort_unstable();
     println!(
         "\nmenu commands right: {right}/{total}\ndictation run as a command: {false_commands}/{dictation_total}\nlatency p50 {} ms, p90 {} ms",
+        percentile(&latencies, 0.5),
+        percentile(&latencies, 0.9),
+    );
+}
+
+/// What the click reader would find on Wikipedia's Octopus article in Safari:
+/// Safari's controls, then the visible part of the page, in screen order.
+fn wikipedia_screen() -> Vec<String> {
+    let items: &[(&str, &str)] = &[
+        ("Back", "button"),
+        ("Forward", "button"),
+        ("Show sidebar", "button"),
+        ("Octopus - Wikipedia", "tab"),
+        ("Share", "button"),
+        ("New Tab", "button"),
+        ("Main menu", "button"),
+        ("Wikipedia The Free Encyclopedia", "link"),
+        ("Search Wikipedia", "field"),
+        ("Search", "button"),
+        ("Donate", "link"),
+        ("Create account", "link"),
+        ("Log in", "link"),
+        ("Personal tools", "button"),
+        ("Main page", "link"),
+        ("Contents", "link"),
+        ("Current events", "link"),
+        ("Random article", "link"),
+        ("About Wikipedia", "link"),
+        ("Contact us", "link"),
+        ("(Top)", "link"),
+        ("Etymology and pluralisation", "link"),
+        ("Evolution", "link"),
+        ("Anatomy", "link"),
+        ("Intelligence", "link"),
+        ("Distribution and habitat", "link"),
+        ("References", "link"),
+        ("Article", "link"),
+        ("Talk", "link"),
+        ("Read", "link"),
+        ("View source", "link"),
+        ("View history", "link"),
+        ("Tools", "button"),
+        ("For other uses, see Octopus (disambiguation)", "link"),
+        ("mollusc", "link"),
+        ("order", "link"),
+        ("Octopoda", "link"),
+        ("[1]", "link"),
+        ("cephalopods", "link"),
+        ("squids", "link"),
+        ("cuttlefish", "link"),
+        ("nautiloids", "link"),
+        ("[2]", "link"),
+        ("beak", "link"),
+        ("siphon", "link"),
+        ("chromatophores", "link"),
+        ("camouflage", "link"),
+        ("edit", "link"),
+        ("edit", "link"),
+    ];
+    let items: Vec<(String, &str)> = items
+        .iter()
+        .map(|(name, kind)| (name.to_string(), *kind))
+        .collect();
+    elements::labels(&items)
+}
+
+/// (utterance, expected): the item's label, "@pointer" for "click this",
+/// or None for dictation.
+const CLICK_CASES: &[(&str, Option<&str>)] = &[
+    ("Click cephalopods", Some("cephalopods (link)")),
+    ("Open the squid link", Some("squids (link)")),
+    ("Click random article", Some("Random article (link)")),
+    (
+        "Go to the intelligence section",
+        Some("Intelligence (link)"),
+    ),
+    ("Click the search box", Some("Search Wikipedia (field)")),
+    ("Click on references", Some("References (link)")),
+    ("Open the talk page", Some("Talk (link)")),
+    ("Click view history", Some("View history (link)")),
+    ("Click camouflage", Some("camouflage (link)")),
+    ("Press the share button", Some("Share (button)")),
+    ("Click this", Some("@pointer")),
+    ("Click here", Some("@pointer")),
+    ("Click that one", Some("@pointer")),
+    // Dictation that must stay dictation
+    ("I clicked on the link you sent me yesterday.", None),
+    ("Can you click through the slides before the meeting?", None),
+    ("The octopus has three hearts and blue blood.", None),
+];
+
+#[test]
+fn wikipedia_screen_has_every_expected_item() {
+    let screen = wikipedia_screen();
+    for (_, expected) in CLICK_CASES {
+        if let Some(label) = expected.filter(|label| !label.starts_with('@')) {
+            assert!(screen.contains(&label.to_string()), "{label} missing");
+        }
+    }
+    assert!(screen.contains(&"edit (link) 2".to_string()));
+}
+
+#[test]
+#[ignore = "calls the live TypeSafe API; set TYPESAFE_API_KEY and pass --ignored"]
+fn live_click_eval() {
+    let (client, model, threshold) = live_client();
+    let ctx = desktop_with_front("Safari");
+    let actions = registry::builtin(&ctx);
+    let screen = wikipedia_screen();
+    let (mut right, mut total) = (0, 0);
+    let (mut false_commands, mut dictation_total) = (0, 0);
+    let mut latencies = Vec::new();
+
+    println!(
+        "threshold {threshold:.2}, model {model}, {} items on screen\n",
+        screen.len()
+    );
+    for (utterance, expected) in CLICK_CASES {
+        let proposal = candidates::propose(utterance, &ctx);
+        let route = tauri::async_runtime::block_on(router::route(
+            &client, utterance, &ctx, &actions, &proposal,
+        ))
+        .unwrap_or_else(|e| panic!("routing '{utterance}' failed: {e}"));
+        let mut latency = route.latency.as_millis();
+
+        let got = match router::decide(&route, &actions, &proposal, threshold) {
+            Decision::Dictation => None,
+            Decision::Run { action, .. } if action.id == "click_pointer" => {
+                Some("@pointer".to_string())
+            }
+            Decision::Run { action, .. } if action.id == "click_element" => {
+                let started = std::time::Instant::now();
+                let picked = tauri::async_runtime::block_on(router::pick_target(
+                    &client, utterance, &ctx, &screen,
+                ))
+                .unwrap_or_else(|e| panic!("picking for '{utterance}' failed: {e}"));
+                latency += started.elapsed().as_millis();
+                Some(match picked {
+                    Some((label, confidence)) if confidence >= super::MIN_TARGET_CONFIDENCE => {
+                        label
+                    }
+                    Some((label, confidence)) => format!("unsure: {label} ({confidence:.2})"),
+                    None => "nothing picked".to_string(),
+                })
+            }
+            Decision::Run { action, arg } => {
+                Some(format!("{} {}", action.id, arg.unwrap_or_default()))
+            }
+            Decision::Unresolved { action, reason } => {
+                Some(format!("{} (unresolved: {reason})", action.id))
+            }
+        };
+        latencies.push(latency);
+        let ok = got.as_deref() == *expected;
+        match expected {
+            Some(_) => {
+                total += 1;
+                right += ok as usize;
+            }
+            None => {
+                dictation_total += 1;
+                false_commands += got.is_some() as usize;
+            }
+        }
+        println!(
+            "{} {:<55} p(cmd)={:.2} -> {} [{} ms]",
+            if ok { "ok  " } else { "MISS" },
+            utterance,
+            route.is_command,
+            got.as_deref().unwrap_or("dictation"),
+            latency,
+        );
+    }
+
+    latencies.sort_unstable();
+    println!(
+        "\nclicks right: {right}/{total}\ndictation run as a command: {false_commands}/{dictation_total}\nlatency (both requests) p50 {} ms, p90 {} ms",
         percentile(&latencies, 0.5),
         percentile(&latencies, 0.9),
     );

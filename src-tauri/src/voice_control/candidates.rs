@@ -189,7 +189,7 @@ pub fn parse_number(utterance: &str) -> Option<u32> {
 }
 
 /// Utterance n-grams (1 to 3 words) to compare app names against.
-fn ngrams(utterance: &str) -> Vec<String> {
+pub(super) fn ngrams(utterance: &str) -> Vec<String> {
     let words: Vec<String> = utterance
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '.')

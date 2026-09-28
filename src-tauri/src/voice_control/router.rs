@@ -193,6 +193,57 @@ pub fn interpret(response: &jev::Response, proposal: &Proposal, latency: Duratio
     }
 }
 
+/// The second request for "click …", made only then: which of the items on
+/// screen the utterance means.
+pub fn build_target_request(
+    utterance: &str,
+    ctx: &DesktopContext,
+    labels: &[String],
+) -> (Value, Value) {
+    let state = json!({
+        "utterance": utterance,
+        "frontmost_app": ctx.frontmost_app,
+        "on_screen": labels,
+    });
+    let mut criteria: Map<String, Value> = labels
+        .iter()
+        .map(|label| (label.clone(), Value::Null))
+        .collect();
+    criteria.insert(
+        NONE.into(),
+        json!("`utterance` names none of the items in `on_screen`"),
+    );
+    let questions = json!({
+        "target": {
+            "type": "choice",
+            "instructions": "Which item in `on_screen` does `utterance` ask to click, press, open or select? Each entry is an item's text and its kind, such as Octopus (link) or Search Wikipedia (field). Items that share a name are numbered after the kind, in screen order.",
+            "criteria": criteria,
+        }
+    });
+    (state, questions)
+}
+
+/// The label Jev picked and how sure it is, if it picked one of `labels`.
+pub fn interpret_target(response: &jev::Response, labels: &[String]) -> Option<(String, f64)> {
+    let answer = response.answer("target")?;
+    let label = answer
+        .choice
+        .clone()
+        .filter(|label| label != NONE && labels.contains(label))?;
+    Some((label, answer.confidence.unwrap_or(0.0)))
+}
+
+pub async fn pick_target(
+    client: &jev::Client,
+    utterance: &str,
+    ctx: &DesktopContext,
+    labels: &[String],
+) -> Result<Option<(String, f64)>, String> {
+    let (state, questions) = build_target_request(utterance, ctx, labels);
+    let response = client.ask(&state, &questions).await?;
+    Ok(interpret_target(&response, labels))
+}
+
 pub async fn route(
     client: &jev::Client,
     utterance: &str,
@@ -363,6 +414,32 @@ mod tests {
         assert_eq!(menu_criteria.len(), 3, "two menu commands plus none");
         assert!(menu_criteria["View > Show Downloads"].is_null());
         assert!(questions["action"]["criteria"]["menu_command"]["not_for"].is_string());
+    }
+
+    #[test]
+    fn target_request_offers_the_items_on_screen() {
+        let labels = vec![
+            "Octopus (link)".to_string(),
+            "Search Wikipedia (field)".to_string(),
+        ];
+        let (state, questions) = build_target_request("click octopus", &safari(), &labels);
+        assert_eq!(state["on_screen"], json!(labels));
+        assert_eq!(state["frontmost_app"], "Safari");
+        let criteria = questions["target"]["criteria"].as_object().unwrap();
+        assert_eq!(criteria.len(), 3, "two items plus none");
+        assert!(criteria["Octopus (link)"].is_null());
+
+        let picked = |pick: &str| interpret_target(&response(&[("target", choice(pick))]), &labels);
+        assert_eq!(
+            picked("Octopus (link)"),
+            Some(("Octopus (link)".to_string(), 0.9))
+        );
+        assert_eq!(picked(NONE), None);
+        assert_eq!(
+            picked("Squid (link)"),
+            None,
+            "only listed items are clicked"
+        );
     }
 
     #[test]

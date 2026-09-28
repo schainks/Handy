@@ -174,28 +174,9 @@ pub fn press(_pid: i32, _path: &[String]) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{commands, is_list_menu, skip_submenu, MenuItem, RawItem};
+    use crate::voice_control::ax::{Element, AX_API_DISABLED, AX_CANNOT_COMPLETE};
     use log::debug;
-    use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString, CFType};
-    use std::ffi::c_void;
-    use std::ptr::NonNull;
     use std::time::{Duration, Instant};
-
-    type AXError = i32;
-    const AX_SUCCESS: AXError = 0;
-    const AX_CANNOT_COMPLETE: AXError = -25204;
-    const AX_API_DISABLED: AXError = -25211;
-
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn AXUIElementCreateApplication(pid: i32) -> *mut c_void;
-        fn AXUIElementCopyAttributeValue(
-            element: *const c_void,
-            attribute: *const c_void,
-            value: *mut *const c_void,
-        ) -> AXError;
-        fn AXUIElementPerformAction(element: *const c_void, action: *const c_void) -> AXError;
-        fn AXUIElementSetMessagingTimeout(element: *const c_void, seconds: f32) -> AXError;
-    }
 
     /// Submenu depth read below each top-level menu ("Mailbox > Go To >
     /// Inbox" is depth 1).
@@ -207,110 +188,6 @@ mod platform {
     /// Menus are read while transcription runs; stop reading past this.
     const CAPTURE_BUDGET: Duration = Duration::from_millis(1200);
     const MAX_ITEMS_READ: usize = 1500;
-
-    /// An AXUIElement, owned, with the messaging timeout its requests use.
-    /// Elements reached from it get the same timeout.
-    struct Element(CFRetained<CFType>, f32);
-
-    impl Element {
-        fn application(pid: i32, timeout: f32) -> Option<Self> {
-            // SAFETY: AXUIElementCreateApplication returns a +1 reference
-            // (Create rule), or null.
-            let raw = unsafe { AXUIElementCreateApplication(pid) };
-            NonNull::new(raw.cast::<CFType>())
-                .map(|ptr| Element::with_timeout(unsafe { CFRetained::from_raw(ptr) }, timeout))
-        }
-
-        fn with_timeout(object: CFRetained<CFType>, timeout: f32) -> Self {
-            let element = Element(object, timeout);
-            // SAFETY: valid element; the timeout only affects this element.
-            unsafe { AXUIElementSetMessagingTimeout(element.as_ptr(), timeout) };
-            element
-        }
-
-        fn as_ptr(&self) -> *const c_void {
-            CFRetained::as_ptr(&self.0).as_ptr().cast_const().cast()
-        }
-
-        fn attribute(&self, name: &str) -> Result<Option<CFRetained<CFType>>, AXError> {
-            let name = CFString::from_str(name);
-            let mut value: *const c_void = std::ptr::null();
-            // SAFETY: valid element and attribute name; on success `value`
-            // holds a +1 reference (Copy rule) or stays null.
-            let err = unsafe {
-                AXUIElementCopyAttributeValue(
-                    self.as_ptr(),
-                    CFRetained::as_ptr(&name).as_ptr().cast_const().cast(),
-                    &mut value,
-                )
-            };
-            if err != AX_SUCCESS {
-                return Err(err);
-            }
-            Ok(NonNull::new(value.cast_mut().cast::<CFType>())
-                .map(|ptr| unsafe { CFRetained::from_raw(ptr) }))
-        }
-
-        fn string(&self, name: &str) -> Option<String> {
-            self.attribute(name)
-                .ok()??
-                .downcast::<CFString>()
-                .ok()
-                .map(|value| value.to_string())
-        }
-
-        fn flag(&self, name: &str) -> Option<bool> {
-            self.attribute(name)
-                .ok()??
-                .downcast::<CFBoolean>()
-                .ok()
-                .map(|value| value.as_bool())
-        }
-
-        fn element(&self, name: &str) -> Result<Option<Element>, AXError> {
-            Ok(self
-                .attribute(name)?
-                .map(|object| Element::with_timeout(object, self.1)))
-        }
-
-        fn children(&self) -> Vec<Element> {
-            let Some(array) = self
-                .attribute("AXChildren")
-                .ok()
-                .flatten()
-                .and_then(|value| value.downcast::<CFArray>().ok())
-            else {
-                return Vec::new();
-            };
-            // SAFETY: AXChildren is an array of AXUIElements, which are CF
-            // types.
-            let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
-            array
-                .iter()
-                .map(|object| Element::with_timeout(object, self.1))
-                .collect()
-        }
-
-        fn title(&self) -> String {
-            self.string("AXTitle").unwrap_or_default()
-        }
-
-        fn press(&self) -> Result<(), AXError> {
-            let action = CFString::from_str("AXPress");
-            // SAFETY: valid element and action name.
-            let err = unsafe {
-                AXUIElementPerformAction(
-                    self.as_ptr(),
-                    CFRetained::as_ptr(&action).as_ptr().cast_const().cast(),
-                )
-            };
-            if err == AX_SUCCESS {
-                Ok(())
-            } else {
-                Err(err)
-            }
-        }
-    }
 
     fn menu_bar(pid: i32, timeout: f32) -> Result<Element, String> {
         let app = Element::application(pid, timeout).ok_or("could not reach the app")?;

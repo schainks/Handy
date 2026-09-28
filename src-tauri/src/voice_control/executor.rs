@@ -8,6 +8,7 @@
 //! label matches one that code read from the app.
 
 use super::context::DesktopContext;
+use super::elements;
 use super::menus;
 use super::registry::{Action, Runner};
 use std::io::Write;
@@ -75,6 +76,12 @@ pub fn run(action: &Action, arg: Option<&str>, ctx: &DesktopContext) -> Result<E
                 .ok_or("that menu command is no longer available")?;
             let pid = ctx.frontmost_pid.ok_or("no frontmost app")?;
             menus::press(pid, &item.path)?;
+        }
+        Runner::ClickPointer => {
+            elements::click_pointer()?;
+        }
+        Runner::ClickElement => {
+            return Err("clicking by name needs its target picked first".to_string());
         }
         Runner::TypeText => unreachable!("handled above"),
     }

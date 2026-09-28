@@ -2,8 +2,9 @@
 
 Handy normally pastes what you say. With voice commands on, a short dictation can
 control your Mac instead: "open Safari", "move this window to the left half",
-"search for flights to Denver", "scratch that", and, inside the app you're using,
-anything in its menus: "show my downloads", "go to my inbox", "switch to week view".
+"search for flights to Denver", "scratch that". Inside the app you're using, it can
+run anything in its menus ("show my downloads", "go to my inbox") and click what's on
+screen ("click cephalopods", "click the search box", "click this").
 
 ## How it decides
 
@@ -67,6 +68,7 @@ when no API key is set or when Jev doesn't answer within 2.5 seconds.
 | Editing | "scratch that", "redo", "copy that", "cut", "paste", "select all", "save", "find", "press enter", "escape", "delete the last word", "page down" | Keystrokes                                         |
 | Typing  | "type hello world"                                                                                                                              | Pastes "hello world", like dictation               |
 | Menus   | "show my downloads", "bookmark this page", "go to my inbox", "mark this as unread", "go to threads", "switch to week view"                      | The front app's own menus, through Accessibility   |
+| Clicks  | "click cephalopods", "open the talk page", "press the share button", "click the search box", "click this"                                       | Accessibility; "click this" clicks at the pointer  |
 
 "Open YouTube" opens the site when no app by that name is installed. A site name without a
 domain ("open the verge") goes to DuckDuckGo's top result.
@@ -94,6 +96,32 @@ Some items are never offered:
   and items that open a dialog (ending in "…").
 
 Items ending in "…" open a dialog rather than acting right away, as they do when clicked.
+
+## Clicking
+
+Say what to click the way it reads on screen: "click cephalopods", "open the talk page",
+"press the share button", "click the search box". Or point at something and say "click
+this" or "click here".
+
+- **By name:** only when you ask to click something, Handy reads the links, buttons, tabs,
+  checkboxes and fields visible in the front window, and a second Jev request picks the
+  one you named. Links and buttons are pressed through Accessibility, so the pointer
+  doesn't move. Fields get the cursor, ready for dictation. Handy clicks only when Jev is
+  at least 50% sure, and it never reads what's typed in a field.
+- **Pages:** in a web page, Handy asks for the visible links and controls in one request,
+  the way VoiceOver finds links. Safari answers it best. Chrome, Arc and Electron apps
+  such as Slack build their page's Accessibility tree only once an app asks for it, which
+  Handy does, so the first click there can come up empty.
+- **"Click this":** clicks wherever the pointer already is, without moving it.
+
+Try it on Wikipedia in Safari:
+
+1. "go to wikipedia.org"
+2. "click the search box", dictate "octopus", then "press enter"
+3. "click cephalopods", "go back", "open the intelligence section", "click random article"
+4. Point at a picture and say "click this".
+
+## Custom commands
 
 Custom commands live in `voice_commands.json` in Handy's app data directory. **Voice
 Commands → Custom Commands → Edit** creates the file from a template and opens it. The file
@@ -157,8 +185,10 @@ A file with a mistake is ignored as a whole, and the Voice Commands page shows w
 Handy is local-first, and this feature is not. With voice commands on, every dictation of
 25 words or fewer is sent to TypeSafe's API, together with the name of the frontmost app,
 the names of its menu commands (without the lists of recent files, history, bookmarks and
-windows described above), and the names of your installed and running apps. Longer
-dictations never leave your Mac. Turn the feature off to keep Handy fully local.
+windows described above), and the names of your installed and running apps. When you ask
+to click something by name, the names of the links, buttons and fields visible in the
+front window are sent too. Longer dictations never leave your Mac. Turn the feature off to
+keep Handy fully local.
 
 ## Tuning and evaluating
 
@@ -169,8 +199,9 @@ dictations never leave your Mac. Turn the feature off to keep Handy fully local.
   Arguments taken from speech are redacted in release builds.
 - A live eval runs 35 commands and 12 command-like dictations ("I think we should close the
   deal...", "Save the date...") through the same request and decision code the app uses, and
-  prints the misses, how often dictation ran as a command, and latency. A second one does the
-  same for menu commands, with Safari, Slack, Mail and Calendar in front:
+  prints the misses, how often dictation ran as a command, and latency. Two more do the same
+  for menu commands (Safari, Slack, Mail and Calendar in front) and for clicking (Wikipedia's
+  Octopus article in Safari):
 
   ```sh
   cd src-tauri
@@ -187,7 +218,9 @@ dictations never leave your Mac. Turn the feature off to keep Handy fully local.
   can copy a command's words.
 - Keystroke actions send standard macOS shortcuts to the frontmost app. Apps with different
   shortcuts won't respond as expected.
-- Menu commands reach what's in the menu bar, not buttons, tabs or links inside a window.
-  Some apps, often Electron ones, put little in their menus.
+- Some apps, often Electron ones, put little in their menus.
+- Clicking reads the front window's controls and visible page content, but not lists and
+  tables (message lists, file lists). "Click the first result" works only when the result
+  has a name to say.
 - Action descriptions are in English, and the History, Bookmarks and Window menus are
   recognized by their English names. Other languages are untested.
