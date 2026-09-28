@@ -1,8 +1,10 @@
 //! What code knows about the desktop when a command is spoken: the frontmost
-//! app (context for "command or dictation?"), the running and installed apps
-//! (candidates for app arguments), and whether Hammerspoon's CLI is installed.
+//! app (context for "command or dictation?") and its menu commands, the running
+//! and installed apps (candidates for app arguments), and whether Hammerspoon's
+//! CLI is installed.
 
 use super::executor::run_process;
+use super::menus::{self, MenuItem};
 use log::debug;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -13,8 +15,12 @@ use std::time::Duration;
 #[derive(Debug, Clone, Default)]
 pub struct DesktopContext {
     pub frontmost_app: Option<String>,
+    /// Process id of the frontmost app, whose menus are read and pressed.
+    pub frontmost_pid: Option<i32>,
     pub running_apps: Vec<String>,
     pub installed_apps: Vec<String>,
+    /// Commands from the frontmost app's menu bar.
+    pub menu_items: Vec<MenuItem>,
     pub hammerspoon_cli: Option<PathBuf>,
 }
 
@@ -39,18 +45,24 @@ for (let i = 0; i < apps.count; i++) {
   const name = ObjC.unwrap(app.localizedName);
   if (app.activationPolicy === 0 && name) running.push(name);
 }
-JSON.stringify({ frontmost: front.isNil() ? null : ObjC.unwrap(front.localizedName), running: running });"#;
+JSON.stringify({
+  frontmost: front.isNil() ? null : ObjC.unwrap(front.localizedName),
+  pid: front.isNil() ? null : front.processIdentifier,
+  running: running,
+});"#;
 
 #[derive(Deserialize)]
 struct RunningApps {
     frontmost: Option<String>,
+    pid: Option<i32>,
     #[serde(default)]
     running: Vec<String>,
 }
 
 impl DesktopContext {
-    /// Snapshot the desktop. Blocking (spawns `osascript`, reads folders), so
-    /// callers run it off the async runtime, concurrently with transcription.
+    /// Snapshot the desktop. Blocking (spawns `osascript`, reads folders and
+    /// the frontmost app's menus), so callers run it off the async runtime,
+    /// concurrently with transcription.
     pub fn capture() -> Self {
         if !cfg!(target_os = "macos") {
             return Self::default();
@@ -69,9 +81,17 @@ impl DesktopContext {
         {
             Ok(apps) => {
                 ctx.frontmost_app = apps.frontmost;
+                ctx.frontmost_pid = apps.pid;
                 ctx.running_apps = apps.running;
             }
             Err(e) => debug!("Could not list running apps: {e}"),
+        }
+
+        // Handy's own menus (frontmost while its settings are open) are no
+        // use as voice commands.
+        let own_pid = i32::try_from(std::process::id()).ok();
+        if let Some(pid) = ctx.frontmost_pid.filter(|pid| Some(*pid) != own_pid) {
+            ctx.menu_items = menus::capture(pid);
         }
 
         ctx

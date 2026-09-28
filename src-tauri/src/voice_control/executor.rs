@@ -1,11 +1,14 @@
 //! Runs a chosen action on macOS: AppleScript through `osascript`, Lua through
-//! Hammerspoon's `hs` CLI, shell commands, URLs and apps through `open`.
+//! Hammerspoon's `hs` CLI, shell commands, URLs and apps through `open`, and
+//! menu commands through the Accessibility API.
 //!
 //! Arguments come from speech, so they never become code: AppleScript gets
 //! them as an escaped string literal, Lua as a long-bracket string, the shell
-//! as `$1`, and URLs percent-encoded.
+//! as `$1`, and URLs percent-encoded. A menu command is pressed only if its
+//! label matches one that code read from the app.
 
 use super::context::DesktopContext;
+use super::menus;
 use super::registry::{Action, Runner};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -63,6 +66,15 @@ pub fn run(action: &Action, arg: Option<&str>, ctx: &DesktopContext) -> Result<E
             let mut open_app = Command::new("open");
             open_app.arg("-a").arg(arg);
             run_process(open_app, None, OPEN_TIMEOUT)?;
+        }
+        Runner::MenuItem => {
+            let item = ctx
+                .menu_items
+                .iter()
+                .find(|item| item.label() == arg)
+                .ok_or("that menu command is no longer available")?;
+            let pid = ctx.frontmost_pid.ok_or("no frontmost app")?;
+            menus::press(pid, &item.path)?;
         }
         Runner::TypeText => unreachable!("handled above"),
     }

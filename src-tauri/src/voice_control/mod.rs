@@ -12,6 +12,7 @@ mod candidates;
 mod context;
 mod executor;
 mod jev;
+mod menus;
 mod registry;
 mod router;
 
@@ -26,7 +27,7 @@ use crate::utils::redact_text;
 use executor::Effect;
 use log::{info, warn};
 use once_cell::sync::OnceCell;
-use registry::Action;
+use registry::{Action, ArgKind};
 use router::Decision;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -148,6 +149,10 @@ pub fn status(app: &AppHandle) -> Result<Status, String> {
 
 fn summarize(action: &Action, arg: Option<&str>) -> String {
     match arg {
+        // A menu command reads best as the item's own title.
+        Some(label) if action.arg == ArgKind::Menu => {
+            label.rsplit(" > ").next().unwrap_or(label).to_string()
+        }
         Some(arg) if !arg.is_empty() => format!("{} · {arg}", action.title),
         _ => action.title.clone(),
     }
@@ -189,13 +194,16 @@ pub async fn handle(
         }
     };
     info!(
-        "Voice command routing: is_command={:.2} action={} ({:.2}) app={:?} text={:?} in {} ms ({}, {} input tokens)",
+        "Voice command routing: is_command={:.2} action={} ({:.2}) app={:?} menu={:?} text={:?} in {} ms ({} menu commands offered, {}, {} input tokens)",
         route.is_command,
         route.action.as_deref().unwrap_or("none"),
         route.action_confidence,
         route.app.as_deref().map(redact_text),
+        // Menu labels come from the app, not from speech.
+        route.menu.as_deref(),
         route.text.as_deref().map(redact_text),
         route.latency.as_millis(),
+        proposal.menus.len(),
         route.model.as_deref().unwrap_or("unknown model"),
         route.input_tokens.unwrap_or_default(),
     );
@@ -226,5 +234,35 @@ pub async fn handle(
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::Runner;
+
+    fn action(arg: ArgKind) -> Action {
+        Action {
+            id: "x".into(),
+            title: "Web search".into(),
+            what: String::new(),
+            not_for: None,
+            arg,
+            runner: Runner::MenuItem,
+        }
+    }
+
+    #[test]
+    fn summaries_name_what_ran() {
+        assert_eq!(
+            summarize(&action(ArgKind::Menu), Some("Mailbox > Go To > Inbox")),
+            "Inbox"
+        );
+        assert_eq!(
+            summarize(&action(ArgKind::Text), Some("cats")),
+            "Web search · cats"
+        );
+        assert_eq!(summarize(&action(ArgKind::None), None), "Web search");
     }
 }

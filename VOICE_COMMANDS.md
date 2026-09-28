@@ -2,7 +2,8 @@
 
 Handy normally pastes what you say. With voice commands on, a short dictation can
 control your Mac instead: "open Safari", "move this window to the left half",
-"search for flights to Denver", "scratch that".
+"search for flights to Denver", "scratch that", and, inside the app you're using,
+anything in its menus: "show my downloads", "go to my inbox", "switch to week view".
 
 ## How it decides
 
@@ -12,21 +13,22 @@ Handy still transcribes locally. After that, **Jev decides and code acts**:
 flowchart TD
   T["Local transcription"] --> L{"More than 25 words?"}
   L -->|yes| P["Paste as dictation"]
-  L -->|no| C["Code proposes candidates:<br/>installed and running apps,<br/>spans cut at cue words"]
-  C --> J["One Jev request, four questions:<br/>is_command, action, app, text"]
+  L -->|no| C["Code proposes candidates:<br/>installed and running apps,<br/>the front app's menu commands,<br/>spans cut at cue words"]
+  C --> J["One Jev request, up to five questions:<br/>is_command, action, app, menu, text"]
   J -->|"P(command) below threshold,<br/>action is none, or Jev unreachable"| P
   J -->|"P(command) at or above threshold"| R["Code fills the argument and runs the action:<br/>AppleScript, open, shell, or Hammerspoon"]
   R --> O["Overlay shows what ran, nothing is pasted"]
 ```
 
 The single request to [TypeSafe System One](https://docs.typesafe.ai) (`jev-1.13.0`
-by default) asks four independent questions:
+by default) asks up to five independent questions:
 
 | Question     | Type   | Asks                                                                                                        |
 | ------------ | ------ | ----------------------------------------------------------------------------------------------------------- |
 | `is_command` | noul   | Is this an instruction for the computer, or text to type into the frontmost app?                            |
 | `action`     | choice | Which listed action, or none                                                                                |
 | `app`        | choice | Which installed or running app is named, if any                                                             |
+| `menu`       | choice | Which of the front app's menu commands is asked for, if any (only when its menus could be read)             |
 | `text`       | choice | Which span of the utterance is the argument (a search query, a site, words to type), from spans cut by code |
 
 Jev never writes a script or an argument. It only picks from lists that code built, so a
@@ -64,6 +66,7 @@ when no API key is set or when Jev doesn't answer within 2.5 seconds.
 | Web     | "search for flights to Denver", "go to github.com", "open YouTube", "new tab", "reopen that tab", "reload", "go back", "next tab"               | Default browser, keystrokes                        |
 | Editing | "scratch that", "redo", "copy that", "cut", "paste", "select all", "save", "find", "press enter", "escape", "delete the last word", "page down" | Keystrokes                                         |
 | Typing  | "type hello world"                                                                                                                              | Pastes "hello world", like dictation               |
+| Menus   | "show my downloads", "bookmark this page", "go to my inbox", "mark this as unread", "go to threads", "switch to week view"                      | The front app's own menus, through Accessibility   |
 
 "Open YouTube" opens the site when no app by that name is installed. A site name without a
 domain ("open the verge") goes to DuckDuckGo's top result.
@@ -72,7 +75,25 @@ No built-in action deletes anything, shuts down, or empties the Trash. Commands 
 as Jev is confident, without asking first, so keep destructive custom commands out of the
 list.
 
-## Custom commands
+## Menu commands
+
+Every Mac app lists what it can do in its menu bar, so the app in front brings its own
+commands. While Handy transcribes, it reads that app's menus through the Accessibility
+permission it already has for pasting: every enabled item, up to two submenus deep
+("Mailbox > Go To > Inbox"). Jev picks the one you asked for, and Handy presses it as if
+you had chosen it from the menu. Built-in actions still handle what they cover, such as
+switching apps, new tab or undo.
+
+Some items are never offered:
+
+- The Apple menu, and items that quit, log out, sign out, shut down, restart, erase,
+  empty, revert or discard.
+- Lists of your own content: Open Recent, Recent Items, Services, Favorites, and in the
+  History, Bookmarks and Window menus the page, bookmark and window titles. Only those
+  menus' fixed commands are kept: their first section, items with a keyboard shortcut,
+  and items that open a dialog (ending in "…").
+
+Items ending in "…" open a dialog rather than acting right away, as they do when clicked.
 
 Custom commands live in `voice_commands.json` in Handy's app data directory. **Voice
 Commands → Custom Commands → Edit** creates the file from a template and opens it. The file
@@ -134,9 +155,10 @@ A file with a mistake is ignored as a whole, and the Voice Commands page shows w
 ## Privacy
 
 Handy is local-first, and this feature is not. With voice commands on, every dictation of
-25 words or fewer is sent to TypeSafe's API, together with the name of the frontmost app and
-the names of your installed and running apps. Longer dictations never leave your Mac. Turn
-the feature off to keep Handy fully local.
+25 words or fewer is sent to TypeSafe's API, together with the name of the frontmost app,
+the names of its menu commands (without the lists of recent files, history, bookmarks and
+windows described above), and the names of your installed and running apps. Longer
+dictations never leave your Mac. Turn the feature off to keep Handy fully local.
 
 ## Tuning and evaluating
 
@@ -147,7 +169,8 @@ the feature off to keep Handy fully local.
   Arguments taken from speech are redacted in release builds.
 - A live eval runs 35 commands and 12 command-like dictations ("I think we should close the
   deal...", "Save the date...") through the same request and decision code the app uses, and
-  prints the misses, how often dictation ran as a command, and latency:
+  prints the misses, how often dictation ran as a command, and latency. A second one does the
+  same for menu commands, with Safari, Slack, Mail and Calendar in front:
 
   ```sh
   cd src-tauri
@@ -164,4 +187,7 @@ the feature off to keep Handy fully local.
   can copy a command's words.
 - Keystroke actions send standard macOS shortcuts to the frontmost app. Apps with different
   shortcuts won't respond as expected.
-- Action descriptions are in English. Other languages are untested.
+- Menu commands reach what's in the menu bar, not buttons, tabs or links inside a window.
+  Some apps, often Electron ones, put little in their menus.
+- Action descriptions are in English, and the History, Bookmarks and Window menus are
+  recognized by their English names. Other languages are untested.

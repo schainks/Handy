@@ -38,6 +38,10 @@ pub enum ArgKind {
     Text,
     /// A number parsed from the utterance by code.
     Number,
+    /// One of the frontmost app's menu commands, chosen by Jev from the ones
+    /// code read. Built-in only: custom commands can't ask for it.
+    #[serde(skip)]
+    Menu,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +60,8 @@ pub enum Runner {
     OpenApp,
     /// Paste the argument into the frontmost app, exactly as dictation would.
     TypeText,
+    /// Press the frontmost app's menu item whose label is the argument.
+    MenuItem,
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +152,7 @@ fn media(hammerspoon: bool, key: &str, applescript_command: &str, spotify: bool)
 /// The built-in actions for this desktop. Window tiling needs Hammerspoon and
 /// is left out without it, rather than offered and then failing.
 pub fn builtin(ctx: &DesktopContext) -> Vec<Action> {
-    use ArgKind::{App, Number, Text};
+    use ArgKind::{App, Menu, Number, Text};
     let hs = ctx.hammerspoon_cli.is_some();
     let spotify = ctx.installed_apps.iter().any(|app| app == "Spotify");
     let none = ArgKind::None;
@@ -505,6 +511,21 @@ pub fn builtin(ctx: &DesktopContext) -> Vec<Action> {
         ]);
     }
 
+    // The frontmost app's own menus: its views, panels, mailboxes and
+    // features, whatever the app is.
+    if !ctx.menu_items.is_empty() {
+        actions.push(
+            action(
+                "menu_command",
+                "Menu command",
+                "Use one of the frontmost app's own menu commands listed in `menu_commands`: go somewhere in the app (a mailbox, view, panel or page), show or hide part of it, or use one of its features",
+                Menu,
+                Runner::MenuItem,
+            )
+            .not_for("Something another listed action does directly, such as switching apps, new tab, undo or copy"),
+        );
+    }
+
     actions
 }
 
@@ -632,6 +653,35 @@ mod tests {
             hammerspoon_cli: hammerspoon.then(|| PathBuf::from("/opt/homebrew/bin/hs")),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn menu_commands_need_the_frontmost_apps_menus() {
+        assert!(!builtin(&ctx(false, &[]))
+            .iter()
+            .any(|a| a.id == "menu_command"));
+
+        let with_menus = DesktopContext {
+            menu_items: vec![crate::voice_control::menus::MenuItem {
+                path: vec!["View".into(), "Zoom In".into()],
+            }],
+            ..ctx(false, &[])
+        };
+        let action = builtin(&with_menus)
+            .into_iter()
+            .find(|a| a.id == "menu_command")
+            .expect("menu_command is offered");
+        assert_eq!(action.arg, ArgKind::Menu);
+        assert_eq!(action.runner, Runner::MenuItem);
+    }
+
+    #[test]
+    fn custom_commands_cannot_take_menu_arguments() {
+        let err = parse_custom(
+            r#"{"commands": [{"id": "x", "description": "d", "argument": "menu", "shell": "true"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("menu"), "{err}");
     }
 
     #[test]

@@ -13,10 +13,14 @@
 //! The dictation cases deliberately contain command words ("open", "close",
 //! "search", "save", "next"): the number that matters most with auto-detect on
 //! the dictation key is how often dictation gets run as a command.
+//!
+//! `live_menu_eval` does the same for menu commands, with Safari, Slack, Mail
+//! and Calendar in front and menus modeled on theirs.
 
 use super::candidates;
 use super::context::DesktopContext;
 use super::jev;
+use super::menus::{self, RawItem};
 use super::registry;
 use super::router::{self, Decision};
 use std::path::PathBuf;
@@ -169,6 +173,7 @@ fn fake_desktop() -> DesktopContext {
         running_apps: vec!["Notes".into(), "Slack".into(), "Safari".into()],
         installed_apps: APPS.iter().map(|app| app.to_string()).collect(),
         hammerspoon_cli: Some(PathBuf::from("/opt/homebrew/bin/hs")),
+        ..Default::default()
     }
 }
 
@@ -176,9 +181,8 @@ fn percentile(sorted: &[u128], p: f64) -> u128 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-#[test]
-#[ignore = "calls the live TypeSafe API; set TYPESAFE_API_KEY and pass --ignored"]
-fn live_routing_eval() {
+/// The live client, model and threshold, from the environment.
+fn live_client() -> (jev::Client, String, f64) {
     let api_key = std::env::var("TYPESAFE_API_KEY").expect("TYPESAFE_API_KEY is not set");
     let model = std::env::var("TYPESAFE_MODEL").unwrap_or_else(|_| jev::DEFAULT_MODEL.into());
     let threshold: f64 = std::env::var("VOICE_COMMANDS_THRESHOLD")
@@ -192,6 +196,13 @@ fn live_routing_eval() {
         &model,
         Duration::from_secs(10),
     );
+    (client, model, threshold)
+}
+
+#[test]
+#[ignore = "calls the live TypeSafe API; set TYPESAFE_API_KEY and pass --ignored"]
+fn live_routing_eval() {
+    let (client, model, threshold) = live_client();
 
     let ctx = fake_desktop();
     let actions = registry::builtin(&ctx);
@@ -248,6 +259,586 @@ fn live_routing_eval() {
     latencies.sort_unstable();
     println!(
         "\ncommands right: {commands_right}/{commands_total}\ndictation run as a command: {false_commands}/{dictation_total}\nlatency p50 {} ms, p90 {} ms",
+        percentile(&latencies, 0.5),
+        percentile(&latencies, 0.9),
+    );
+}
+
+/// (frontmost app, utterance, expected menu command, or None for dictation)
+const MENU_CASES: &[(&str, &str, Option<&str>)] = &[
+    ("Safari", "Show my downloads", Some("View > Show Downloads")),
+    (
+        "Safari",
+        "Bookmark this page",
+        Some("Bookmarks > Add Bookmark…"),
+    ),
+    (
+        "Safari",
+        "Show all my history",
+        Some("History > Show All History"),
+    ),
+    ("Safari", "Zoom in", Some("View > Zoom In")),
+    (
+        "Safari",
+        "Make the text bigger",
+        Some("View > Make Text Bigger"),
+    ),
+    (
+        "Safari",
+        "Open a private window",
+        Some("File > New Private Window"),
+    ),
+    ("Safari", "Show the sidebar", Some("View > Show Sidebar")),
+    (
+        "Safari",
+        "Add this to my reading list",
+        Some("Bookmarks > Add to Reading List"),
+    ),
+    (
+        "Safari",
+        "Switch to reader mode",
+        Some("View > Show Reader"),
+    ),
+    ("Slack", "Go to my threads", Some("Go > Threads")),
+    ("Slack", "Show my activity", Some("Go > Activity")),
+    ("Slack", "Open my DMs", Some("Go > DMs")),
+    (
+        "Slack",
+        "Next unread channel",
+        Some("Go > Next Unread Channel"),
+    ),
+    ("Slack", "Hide the sidebar", Some("View > Hide Sidebar")),
+    ("Slack", "Start a new message", Some("File > New Message")),
+    ("Mail", "Go to my inbox", Some("Mailbox > Go To > Inbox")),
+    ("Mail", "Show my sent mail", Some("Mailbox > Go To > Sent")),
+    (
+        "Mail",
+        "Check for new mail",
+        Some("Mailbox > Get All New Mail"),
+    ),
+    ("Mail", "Reply to this", Some("Message > Reply")),
+    ("Mail", "Forward this email", Some("Message > Forward")),
+    (
+        "Mail",
+        "Mark this as unread",
+        Some("Message > Mark > As Unread"),
+    ),
+    ("Mail", "Archive this message", Some("Message > Archive")),
+    ("Calendar", "Show the week view", Some("View > by Week")),
+    ("Calendar", "Switch to month view", Some("View > by Month")),
+    ("Calendar", "Go to today", Some("View > Go to Today")),
+    ("Calendar", "Create a new event", Some("File > New Event")),
+    // Dictation that must stay dictation
+    (
+        "Mail",
+        "Please reply to this by Friday so we can finalize the plan.",
+        None,
+    ),
+    (
+        "Mail",
+        "Can you forward me the invoice from last month?",
+        None,
+    ),
+    ("Slack", "Did you see the thread about the launch?", None),
+    ("Slack", "I'll jump on a call in five minutes.", None),
+    ("Calendar", "Let's move the meeting to next week.", None),
+    (
+        "Safari",
+        "The history of the Roman Empire is fascinating.",
+        None,
+    ),
+];
+
+fn item(title: &str) -> RawItem {
+    RawItem {
+        title: title.into(),
+        enabled: true,
+        has_shortcut: false,
+        submenu: None,
+    }
+}
+
+/// An item with a keyboard shortcut.
+fn key(title: &str) -> RawItem {
+    RawItem {
+        has_shortcut: true,
+        ..item(title)
+    }
+}
+
+fn sep() -> RawItem {
+    RawItem::default()
+}
+
+fn sub(title: &str, items: Vec<RawItem>) -> RawItem {
+    RawItem {
+        submenu: Some(items),
+        ..item(title)
+    }
+}
+
+fn top(title: &str, items: Vec<RawItem>) -> (String, Vec<RawItem>) {
+    (title.into(), items)
+}
+
+fn edit_menu() -> (String, Vec<RawItem>) {
+    top(
+        "Edit",
+        vec![
+            key("Undo"),
+            key("Redo"),
+            sep(),
+            key("Cut"),
+            key("Copy"),
+            key("Paste"),
+            key("Select All"),
+            sep(),
+            sub(
+                "Find",
+                vec![key("Find…"), key("Find Next"), key("Find Previous")],
+            ),
+        ],
+    )
+}
+
+/// Menu bars modeled on the real apps, including the parts that must be
+/// filtered out (Apple menu, Quit, history entries, window titles).
+fn fake_menus(app: &str) -> Vec<(String, Vec<RawItem>)> {
+    let apple = top("Apple", vec![item("About This Mac"), item("Restart…")]);
+    match app {
+        "Safari" => vec![
+            apple,
+            top(
+                "Safari",
+                vec![
+                    item("About Safari"),
+                    key("Settings…"),
+                    item("Privacy Report"),
+                    item("Clear History…"),
+                    sep(),
+                    sub("Services", vec![item("Make Sticky")]),
+                    sep(),
+                    key("Hide Safari"),
+                    key("Quit Safari"),
+                ],
+            ),
+            top(
+                "File",
+                vec![
+                    key("New Window"),
+                    key("New Private Window"),
+                    key("New Tab"),
+                    key("Open File…"),
+                    key("Open Location…"),
+                    sep(),
+                    key("Close Window"),
+                    key("Close Tab"),
+                    key("Save As…"),
+                    sub(
+                        "Share",
+                        vec![item("Mail"), item("Messages"), item("AirDrop")],
+                    ),
+                    sep(),
+                    item("Export as PDF…"),
+                    key("Print…"),
+                ],
+            ),
+            edit_menu(),
+            top(
+                "View",
+                vec![
+                    item("Show Toolbar"),
+                    item("Customize Toolbar…"),
+                    sep(),
+                    item("Show Tab Bar"),
+                    key("Show Tab Overview"),
+                    key("Show Sidebar"),
+                    key("Show Downloads"),
+                    sep(),
+                    key("Stop"),
+                    key("Reload Page"),
+                    sep(),
+                    key("Actual Size"),
+                    key("Zoom In"),
+                    key("Zoom Out"),
+                    key("Make Text Bigger"),
+                    key("Make Text Smaller"),
+                    sep(),
+                    key("Show Reader"),
+                    key("Enter Full Screen"),
+                ],
+            ),
+            top(
+                "History",
+                vec![
+                    key("Show Start Page"),
+                    key("Back"),
+                    key("Forward"),
+                    key("Home"),
+                    sep(),
+                    key("Reopen Last Closed Tab"),
+                    item("Reopen All Windows from Last Session"),
+                    sep(),
+                    item("GitHub - schainks/Handy"),
+                    item("Inbox (3) - Gmail"),
+                    sep(),
+                    key("Show All History"),
+                    item("Clear History…"),
+                ],
+            ),
+            top(
+                "Bookmarks",
+                vec![
+                    key("Show Bookmarks"),
+                    key("Edit Bookmarks"),
+                    key("Add Bookmark…"),
+                    key("Add to Reading List"),
+                    sep(),
+                    sub("Favorites", vec![item("Hacker News"), item("Weather")]),
+                    sep(),
+                    item("Recipes"),
+                ],
+            ),
+            top(
+                "Window",
+                vec![
+                    key("Minimize"),
+                    item("Zoom"),
+                    sep(),
+                    key("Show Previous Tab"),
+                    key("Show Next Tab"),
+                    item("Move Tab to New Window"),
+                    item("Merge All Windows"),
+                    sep(),
+                    item("Bring All to Front"),
+                    sep(),
+                    item("Handy PR - GitHub"),
+                ],
+            ),
+        ],
+        "Slack" => vec![
+            apple,
+            top(
+                "Slack",
+                vec![
+                    item("About Slack"),
+                    key("Settings…"),
+                    sep(),
+                    key("Hide Slack"),
+                    key("Quit Slack"),
+                ],
+            ),
+            top(
+                "File",
+                vec![
+                    key("New Message"),
+                    key("New Window"),
+                    sep(),
+                    sub("Workspace", vec![item("Acme"), item("Personal")]),
+                    sep(),
+                    key("Close Window"),
+                ],
+            ),
+            edit_menu(),
+            top(
+                "View",
+                vec![
+                    key("Reload"),
+                    sep(),
+                    key("Actual Size"),
+                    key("Zoom In"),
+                    key("Zoom Out"),
+                    sep(),
+                    key("Toggle Full Screen"),
+                    key("Hide Sidebar"),
+                ],
+            ),
+            top(
+                "Go",
+                vec![
+                    key("Back"),
+                    key("Forward"),
+                    sep(),
+                    key("Home"),
+                    key("DMs"),
+                    key("Activity"),
+                    key("Threads"),
+                    key("Later"),
+                    sep(),
+                    key("Jump to…"),
+                    key("Search"),
+                    sep(),
+                    key("Next Unread Channel"),
+                    key("Previous Unread Channel"),
+                    key("Next Channel"),
+                    key("Previous Channel"),
+                ],
+            ),
+            top(
+                "Window",
+                vec![
+                    key("Minimize"),
+                    item("Zoom"),
+                    sep(),
+                    item("general | Acme – Slack"),
+                ],
+            ),
+        ],
+        "Mail" => vec![
+            apple,
+            top(
+                "Mail",
+                vec![
+                    item("About Mail"),
+                    key("Settings…"),
+                    item("Accounts…"),
+                    sep(),
+                    sub("Services", vec![item("Make Sticky")]),
+                    sep(),
+                    key("Hide Mail"),
+                    key("Quit Mail"),
+                ],
+            ),
+            top(
+                "File",
+                vec![
+                    key("New Message"),
+                    key("New Viewer Window"),
+                    key("Open Message"),
+                    key("Close"),
+                    sep(),
+                    key("Save As…"),
+                    item("Save Attachments…"),
+                    sep(),
+                    key("Print…"),
+                ],
+            ),
+            edit_menu(),
+            top(
+                "View",
+                vec![
+                    sub("Sort By", vec![item("Date"), item("From"), item("Subject")]),
+                    sep(),
+                    key("Hide Sidebar"),
+                    item("Show Favorites Bar"),
+                    sep(),
+                    key("Enter Full Screen"),
+                ],
+            ),
+            top(
+                "Mailbox",
+                vec![
+                    item("Take All Accounts Online"),
+                    sep(),
+                    key("Get All New Mail"),
+                    sep(),
+                    sub(
+                        "Go To",
+                        vec![
+                            key("Inbox"),
+                            key("VIPs"),
+                            key("Sent"),
+                            key("Drafts"),
+                            key("Flagged"),
+                        ],
+                    ),
+                    sub("Move To", vec![item("Archive"), item("Receipts")]),
+                    sep(),
+                    item("New Mailbox…"),
+                    sub("Erase Deleted Items", vec![item("In All Accounts")]),
+                    key("Erase Junk Mail"),
+                ],
+            ),
+            top(
+                "Message",
+                vec![
+                    key("Send Again"),
+                    sep(),
+                    key("Reply"),
+                    key("Reply All"),
+                    key("Forward"),
+                    key("Redirect"),
+                    sep(),
+                    sub(
+                        "Mark",
+                        vec![key("As Read"), key("As Unread"), key("As Junk Mail")],
+                    ),
+                    sub("Flag", vec![item("Red"), item("Orange")]),
+                    key("Archive"),
+                    item("Move to Junk"),
+                    sep(),
+                    item("Mute"),
+                ],
+            ),
+            top(
+                "Window",
+                vec![
+                    key("Minimize"),
+                    item("Zoom"),
+                    sep(),
+                    key("Message Viewer"),
+                    item("Activity"),
+                    sep(),
+                    item("Inbox — iCloud"),
+                ],
+            ),
+        ],
+        "Calendar" => vec![
+            apple,
+            top(
+                "Calendar",
+                vec![
+                    item("About Calendar"),
+                    key("Settings…"),
+                    sep(),
+                    key("Quit Calendar"),
+                ],
+            ),
+            top(
+                "File",
+                vec![
+                    key("New Event"),
+                    key("New Calendar"),
+                    item("New Calendar Subscription…"),
+                    sep(),
+                    item("Import…"),
+                    sep(),
+                    key("Close"),
+                    key("Print…"),
+                ],
+            ),
+            edit_menu(),
+            top(
+                "View",
+                vec![
+                    key("by Day"),
+                    key("by Week"),
+                    key("by Month"),
+                    key("by Year"),
+                    sep(),
+                    key("Next"),
+                    key("Previous"),
+                    key("Go to Today"),
+                    key("Go to Date…"),
+                    sep(),
+                    item("Show Calendar List"),
+                    sep(),
+                    key("Refresh Calendars"),
+                ],
+            ),
+            top("Window", vec![key("Minimize"), item("Zoom")]),
+        ],
+        other => panic!("no fake menus for {other}"),
+    }
+}
+
+fn desktop_with_front(app: &str) -> DesktopContext {
+    DesktopContext {
+        frontmost_app: Some(app.into()),
+        frontmost_pid: Some(1),
+        menu_items: menus::commands(&fake_menus(app)),
+        ..fake_desktop()
+    }
+}
+
+#[test]
+fn fake_menus_keep_commands_and_drop_private_lists() {
+    let labels: Vec<String> = desktop_with_front("Safari")
+        .menu_items
+        .iter()
+        .map(|item| item.label())
+        .collect();
+    for expected in [
+        "View > Show Downloads",
+        "History > Show All History",
+        "Bookmarks > Add Bookmark…",
+        "Window > Show Next Tab",
+    ] {
+        assert!(labels.contains(&expected.to_string()), "{expected} missing");
+    }
+    for private in [
+        "GitHub - schainks/Handy",
+        "Recipes",
+        "Handy PR - GitHub",
+        "Hacker News",
+    ] {
+        assert!(
+            !labels.iter().any(|label| label.ends_with(private)),
+            "{private} was offered"
+        );
+    }
+    assert!(!labels.iter().any(|label| label.contains("Quit")));
+    for (app, _, expected) in MENU_CASES {
+        if let Some(expected) = expected {
+            let labels: Vec<String> = desktop_with_front(app)
+                .menu_items
+                .iter()
+                .map(|item| item.label())
+                .collect();
+            assert!(
+                labels.contains(&expected.to_string()),
+                "{app}: {expected} missing"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "calls the live TypeSafe API; set TYPESAFE_API_KEY and pass --ignored"]
+fn live_menu_eval() {
+    let (client, model, threshold) = live_client();
+    let (mut right, mut total) = (0, 0);
+    let (mut false_commands, mut dictation_total) = (0, 0);
+    let mut latencies = Vec::new();
+
+    println!("threshold {threshold:.2}, model {model}\n");
+    for (app, utterance, expected) in MENU_CASES {
+        let ctx = desktop_with_front(app);
+        let actions = registry::builtin(&ctx);
+        let proposal = candidates::propose(utterance, &ctx);
+        let route = tauri::async_runtime::block_on(router::route(
+            &client, utterance, &ctx, &actions, &proposal,
+        ))
+        .unwrap_or_else(|e| panic!("routing '{utterance}' failed: {e}"));
+        latencies.push(route.latency.as_millis());
+
+        let got = match router::decide(&route, &actions, &proposal, threshold) {
+            Decision::Dictation => None,
+            Decision::Run { action, arg } => {
+                Some(format!("{} {}", action.id, arg.unwrap_or_default()))
+            }
+            Decision::Unresolved { action, reason } => {
+                Some(format!("{} (unresolved: {reason})", action.id))
+            }
+        };
+        let ok = match expected {
+            Some(label) => got.as_deref() == Some(&format!("menu_command {label}")),
+            None => got.is_none(),
+        };
+        match expected {
+            Some(_) => {
+                total += 1;
+                right += ok as usize;
+            }
+            None => {
+                dictation_total += 1;
+                false_commands += got.is_some() as usize;
+            }
+        }
+        println!(
+            "{} [{app:<8}] {:<60} p(cmd)={:.2} -> {} [{} menu commands, {} ms]",
+            if ok { "ok  " } else { "MISS" },
+            utterance,
+            route.is_command,
+            got.as_deref().unwrap_or("dictation"),
+            proposal.menus.len(),
+            route.latency.as_millis(),
+        );
+    }
+
+    latencies.sort_unstable();
+    println!(
+        "\nmenu commands right: {right}/{total}\ndictation run as a command: {false_commands}/{dictation_total}\nlatency p50 {} ms, p90 {} ms",
         percentile(&latencies, 0.5),
         percentile(&latencies, 0.9),
     );

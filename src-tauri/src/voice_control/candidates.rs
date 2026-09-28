@@ -1,21 +1,27 @@
 //! Code proposes, Jev chooses. Jev picks an action but doesn't write its
 //! argument, so code offers the plausible arguments as options: app names from
-//! the desktop, and spans cut from the utterance at cue words ("search for",
-//! "type", "go to"...). Jev then picks among them in the same request. Numbers
-//! are unambiguous enough to parse outright.
+//! the desktop, the frontmost app's menu commands, and spans cut from the
+//! utterance at cue words ("search for", "type", "go to"...). Jev then picks
+//! among them in the same request. Numbers are unambiguous enough to parse
+//! outright.
 
 use super::context::DesktopContext;
+use super::menus::MenuItem;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
 /// One Choice over apps, well under Jev's 255-option limit.
 pub const MAX_APP_CANDIDATES: usize = 200;
+/// One Choice over menu commands. Most apps have fewer.
+pub const MAX_MENU_CANDIDATES: usize = 200;
 pub const MAX_SPANS: usize = 12;
 
 #[derive(Debug, Clone, Default)]
 pub struct Proposal {
     pub apps: Vec<String>,
+    /// Labels of the frontmost app's menu commands ("View > Zoom In").
+    pub menus: Vec<String>,
     pub spans: Vec<String>,
     pub number: Option<u32>,
 }
@@ -28,6 +34,7 @@ pub fn propose(utterance: &str, ctx: &DesktopContext) -> Proposal {
             utterance,
             MAX_APP_CANDIDATES,
         ),
+        menus: shortlist_menus(&ctx.menu_items, utterance, MAX_MENU_CANDIDATES),
         spans: text_spans(utterance),
         number: parse_number(utterance),
     }
@@ -241,6 +248,35 @@ pub fn shortlist_apps(
     scored.into_iter().map(|(_, _, name)| name).collect()
 }
 
+/// Every menu command when they fit in one Choice. Otherwise those whose
+/// titles look most like something in the utterance, kept in menu order.
+pub fn shortlist_menus(items: &[MenuItem], utterance: &str, cap: usize) -> Vec<String> {
+    if items.len() <= cap {
+        return items.iter().map(MenuItem::label).collect();
+    }
+    let grams = ngrams(utterance);
+    let mut scored: Vec<(f64, usize)> = items
+        .iter()
+        .enumerate()
+        .map(|(order, item)| {
+            let title = item.title().to_lowercase();
+            let likeness = grams
+                .iter()
+                .map(|gram| strsim::jaro_winkler(&title, gram))
+                .fold(0.0, f64::max);
+            (likeness, order)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut kept: Vec<usize> = scored
+        .into_iter()
+        .take(cap)
+        .map(|(_, order)| order)
+        .collect();
+    kept.sort_unstable();
+    kept.into_iter().map(|order| items[order].label()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +348,41 @@ mod tests {
             10,
         );
         assert_eq!(apps, strings(&["Slack", "Terminal", "Safari", "Notes"]));
+    }
+
+    fn menu_item(path: &[&str]) -> MenuItem {
+        MenuItem {
+            path: strings(path),
+        }
+    }
+
+    #[test]
+    fn menus_all_fit_under_the_cap() {
+        let items = vec![
+            menu_item(&["View", "Zoom In"]),
+            menu_item(&["Mailbox", "Go To", "Inbox"]),
+        ];
+        assert_eq!(
+            shortlist_menus(&items, "go to my inbox", 10),
+            strings(&["View > Zoom In", "Mailbox > Go To > Inbox"])
+        );
+    }
+
+    #[test]
+    fn menus_over_the_cap_keep_the_likeliest_in_menu_order() {
+        let mut items: Vec<MenuItem> = (0..300)
+            .map(|i| menu_item(&["Format", &format!("Style {i}")]))
+            .collect();
+        items.insert(150, menu_item(&["View", "Show Downloads"]));
+        items.push(menu_item(&["History", "Show All History"]));
+        let kept = shortlist_menus(&items, "show my downloads", 20);
+        assert_eq!(kept.len(), 20);
+        assert!(kept.contains(&"View > Show Downloads".to_string()));
+        let downloads = kept.iter().position(|l| l == "View > Show Downloads");
+        let history = kept.iter().position(|l| l == "History > Show All History");
+        if let (Some(downloads), Some(history)) = (downloads, history) {
+            assert!(downloads < history, "menu order is kept");
+        }
     }
 
     #[test]

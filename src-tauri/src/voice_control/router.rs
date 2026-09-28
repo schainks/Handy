@@ -1,9 +1,10 @@
 //! One Jev request per utterance, then a decision in code.
 //!
-//! The request asks four independent questions at once:
+//! The request asks up to five independent questions at once:
 //!   is_command  noul    is this an instruction for the computer, or dictation?
 //!   action      choice  which action, or none
 //!   app         choice  which of the proposed apps is named, or none
+//!   menu        choice  which of the frontmost app's menu commands, or none
 //!   text        choice  which proposed span of the utterance is the argument
 //! Code reads only the answers the chosen action needs.
 
@@ -24,6 +25,8 @@ pub struct Route {
     pub action: Option<String>,
     pub action_confidence: f64,
     pub app: Option<String>,
+    /// Label of the frontmost app's menu command Jev picked.
+    pub menu: Option<String>,
     pub text: Option<String>,
     pub latency: Duration,
     pub model: Option<String>,
@@ -63,12 +66,15 @@ pub fn build_request(
         .map(|(i, span)| (span_key(i), json!(span)))
         .collect();
 
-    let state = json!({
+    let mut state = json!({
         "utterance": utterance,
         "frontmost_app": ctx.frontmost_app,
         "apps": proposal.apps,
         "text_spans": spans,
     });
+    if !proposal.menus.is_empty() {
+        state["menu_commands"] = json!(proposal.menus);
+    }
 
     let mut action_criteria = Map::new();
     for action in actions {
@@ -113,6 +119,23 @@ pub fn build_request(
             "type": "choice",
             "instructions": "If `utterance` names an application, which entry in `apps` is it? Speech recognition may have misspelled the name.",
             "criteria": app_criteria,
+        });
+    }
+
+    if !proposal.menus.is_empty() {
+        let mut menu_criteria: Map<String, Value> = proposal
+            .menus
+            .iter()
+            .map(|label| (label.clone(), Value::Null))
+            .collect();
+        menu_criteria.insert(
+            NONE.into(),
+            json!("`utterance` asks for none of the entries in `menu_commands`"),
+        );
+        questions["menu"] = json!({
+            "type": "choice",
+            "instructions": "If `utterance` asks `frontmost_app` for something one of its menu commands does, which entry in `menu_commands` is it? Entries are menu paths, such as View > Show Sidebar.",
+            "criteria": menu_criteria,
         });
     }
 
@@ -162,6 +185,7 @@ pub fn interpret(response: &jev::Response, proposal: &Proposal, latency: Duratio
             .and_then(|answer| answer.confidence)
             .unwrap_or(0.0),
         app: picked("app").filter(|app| proposal.apps.contains(app)),
+        menu: picked("menu").filter(|label| proposal.menus.contains(label)),
         text,
         latency,
         model: response.model.clone(),
@@ -209,6 +233,7 @@ pub fn decide(route: &Route, actions: &[Action], proposal: &Proposal, threshold:
             proposal.number.map(|n| n.to_string()),
             "no number was heard",
         ),
+        ArgKind::Menu => (route.menu.clone(), "no matching menu command was found"),
     };
 
     if action.arg != ArgKind::None && arg.is_none() {
@@ -240,8 +265,24 @@ mod tests {
     fn proposal() -> Proposal {
         Proposal {
             apps: vec!["Safari".into(), "Slack".into()],
+            menus: vec!["View > Zoom In".into(), "View > Show Downloads".into()],
             spans: vec!["search for cats".into(), "cats".into()],
             number: Some(30),
+        }
+    }
+
+    /// Safari in front, with two menu commands read.
+    fn safari() -> DesktopContext {
+        DesktopContext {
+            frontmost_app: Some("Safari".into()),
+            frontmost_pid: Some(42),
+            menu_items: ["Zoom In", "Show Downloads"]
+                .iter()
+                .map(|title| crate::voice_control::menus::MenuItem {
+                    path: vec!["View".into(), title.to_string()],
+                })
+                .collect(),
+            ..ctx()
         }
     }
 
@@ -303,9 +344,58 @@ mod tests {
     #[test]
     fn request_skips_questions_without_candidates() {
         let empty = Proposal::default();
-        let (_, questions) = build_request("mute", &ctx(), &builtin(&ctx()), &empty);
+        let (state, questions) = build_request("mute", &ctx(), &builtin(&ctx()), &empty);
         assert!(questions.get("app").is_none());
+        assert!(questions.get("menu").is_none());
         assert!(questions.get("text").is_none());
+        assert!(state.get("menu_commands").is_none());
+    }
+
+    #[test]
+    fn request_offers_the_frontmost_apps_menu_commands() {
+        let actions = builtin(&safari());
+        let (state, questions) = build_request("show downloads", &safari(), &actions, &proposal());
+        assert_eq!(
+            state["menu_commands"],
+            json!(["View > Zoom In", "View > Show Downloads"])
+        );
+        let menu_criteria = questions["menu"]["criteria"].as_object().unwrap();
+        assert_eq!(menu_criteria.len(), 3, "two menu commands plus none");
+        assert!(menu_criteria["View > Show Downloads"].is_null());
+        assert!(questions["action"]["criteria"]["menu_command"]["not_for"].is_string());
+    }
+
+    #[test]
+    fn runs_the_menu_command_jev_picked() {
+        let actions = builtin(&safari());
+        let answers = [
+            ("is_command", noul(0.9)),
+            ("action", choice("menu_command")),
+            ("menu", choice("View > Show Downloads")),
+        ];
+        match decide(&route_for(&answers), &actions, &proposal(), 0.7) {
+            Decision::Run { action, arg } => {
+                assert_eq!(action.id, "menu_command");
+                assert_eq!(arg.as_deref(), Some("View > Show Downloads"));
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+
+        let unknown = route_for(&[("menu", choice("File > Not Read"))]);
+        assert_eq!(
+            unknown.menu, None,
+            "only proposed menu commands are accepted"
+        );
+
+        let no_match = [
+            ("is_command", noul(0.9)),
+            ("action", choice("menu_command")),
+            ("menu", choice(NONE)),
+        ];
+        assert!(matches!(
+            decide(&route_for(&no_match), &actions, &proposal(), 0.7),
+            Decision::Unresolved { .. }
+        ));
     }
 
     #[test]
