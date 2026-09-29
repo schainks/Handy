@@ -137,6 +137,10 @@ mod platform {
     /// Reading happens after the user asked to click, so it holds up the
     /// click: stop reading past this.
     const BUDGET: Duration = Duration::from_millis(1500);
+    /// A page that came back empty is read once more after this pause, if the
+    /// first pass took less than `RETRY_UNTIL`.
+    const RETRY_DELAY: Duration = Duration::from_millis(250);
+    const RETRY_UNTIL: Duration = Duration::from_millis(1000);
     /// Window controls (toolbar, tab bar, sidebars) around the page.
     const MAX_WINDOW_NODES: usize = 600;
     const MAX_WINDOW_DEPTH: usize = 12;
@@ -279,27 +283,69 @@ mod platform {
         }
     }
 
-    /// The clickable items in the front window of the app with process id
-    /// `pid`: its controls, then the visible items of any page it shows.
-    pub fn read(pid: i32) -> Result<Vec<Clickable>, String> {
-        let started = Instant::now();
-        let app = Element::application(pid, TIMEOUT_SECS).ok_or("could not reach the app")?;
-        // Chromium and Electron apps (Chrome, Arc, Slack) build their page's
-        // Accessibility tree only once an app asks for it; others ignore this.
-        let _ = app.set_flag("AXManualAccessibility", true);
-        let window = match app.element("AXFocusedWindow") {
-            Ok(Some(window)) => window,
+    fn front_window(app: &Element) -> Result<Element, String> {
+        match app.element("AXFocusedWindow") {
+            Ok(Some(window)) => Ok(window),
             Ok(None) => app
                 .elements("AXWindows")
                 .into_iter()
                 .next()
-                .ok_or("the app has no open window")?,
+                .ok_or_else(|| "the app has no open window".to_string()),
             Err(AX_API_DISABLED) => {
-                return Err("Handy needs the Accessibility permission to click things".into())
+                Err("Handy needs the Accessibility permission to click things".into())
             }
-            Err(e) => return Err(format!("could not read the front window (AX error {e})")),
-        };
+            Err(e) => Err(format!("could not read the front window (AX error {e})")),
+        }
+    }
+
+    /// The visible links and controls of one web view: the VoiceOver-style
+    /// search first, then a bounded walk of the page if the search fails or
+    /// comes back empty (a page still building its tree answers with nothing).
+    fn read_page(
+        page: Element,
+        window: Option<(CGPoint, CGSize)>,
+        started: Instant,
+        found: &mut Vec<Found>,
+    ) {
+        let before = found.len();
+        match page.search_visible(&["AXLinkSearchKey", "AXControlSearchKey"], MAX_PAGE_ITEMS) {
+            Ok(items) => {
+                for element in items {
+                    if started.elapsed() > BUDGET {
+                        break;
+                    }
+                    if let Some((kind, name)) = describe(&element) {
+                        found.push(Found {
+                            element,
+                            kind,
+                            name,
+                        });
+                    }
+                }
+            }
+            Err(e) => debug!("Page can't be searched (AX error {e})"),
+        }
+        if found.len() == before {
+            walk_page(page, window, started, found);
+        }
+    }
+
+    /// What one pass over the front window found.
+    struct Pass {
+        found: Vec<Found>,
+        /// How many of `found` came from web pages rather than window controls.
+        from_pages: usize,
+        /// The window shows a web page, whether or not its contents were found.
+        shows_page: bool,
+    }
+
+    /// One pass over the window: its controls, then the visible items of any
+    /// page it shows.
+    fn read_window(window: Element, started: Instant) -> Pass {
         let window_frame = window.frame();
+        let shows_page = window
+            .string("AXDocument")
+            .is_some_and(|document| document.starts_with("http"));
 
         let mut found = Vec::new();
         let mut pages = Vec::new();
@@ -336,28 +382,42 @@ mod platform {
             }
         }
 
+        let from_window = found.len();
+        let web_views = pages.len();
         for page in pages.into_iter().take(MAX_WEB_AREAS) {
-            match page.search_visible(&["AXLinkSearchKey", "AXControlSearchKey"], MAX_PAGE_ITEMS) {
-                Ok(items) => {
-                    for element in items {
-                        if started.elapsed() > BUDGET {
-                            break;
-                        }
-                        if let Some((kind, name)) = describe(&element) {
-                            found.push(Found {
-                                element,
-                                kind,
-                                name,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Page can't be searched (AX error {e}); walking it instead");
-                    walk_page(page, window_frame, started, &mut found);
-                }
+            read_page(page, window_frame, started, &mut found);
+        }
+        let from_pages = found.len() - from_window;
+        debug!(
+            "Window pass: {from_window} controls, {web_views} web views, {from_pages} page items, shows a page: {shows_page}"
+        );
+        Pass {
+            found,
+            from_pages,
+            shows_page: shows_page || web_views > 0,
+        }
+    }
+
+    /// The clickable items in the front window of the app with process id
+    /// `pid`: its controls, then the visible items of any page it shows.
+    pub fn read(pid: i32) -> Result<Vec<Clickable>, String> {
+        let started = Instant::now();
+        let app = Element::application(pid, TIMEOUT_SECS).ok_or("could not reach the app")?;
+        // Chromium and Electron apps (Chrome, Arc, Slack) build their page's
+        // Accessibility tree only once an app asks for it; others ignore this.
+        let _ = app.set_flag("AXManualAccessibility", true);
+
+        let mut pass = read_window(front_window(&app)?, started);
+        // A page that just loaded, or a browser building its tree for the
+        // first time, answers with nothing at first. Ask once more.
+        if pass.shows_page && pass.from_pages == 0 && started.elapsed() < RETRY_UNTIL {
+            std::thread::sleep(RETRY_DELAY);
+            let again = read_window(front_window(&app)?, started);
+            if again.from_pages > 0 {
+                pass = again;
             }
         }
+        let found = pass.found;
 
         let names: Vec<(String, &str)> = found
             .iter()
