@@ -6,7 +6,9 @@
 //! outright.
 
 use super::context::DesktopContext;
+use super::jev::Profile;
 use super::menus::MenuItem;
+use super::registry::{Action, ArgKind};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
@@ -17,6 +19,13 @@ pub const MAX_APP_CANDIDATES: usize = 200;
 pub const MAX_MENU_CANDIDATES: usize = 200;
 pub const MAX_SPANS: usize = 12;
 
+/// A small local model handles about twenty options per question well and
+/// loses the thread beyond that, so its requests carry shortlists.
+pub const LOCAL_MAX_ACTIONS: usize = 14;
+pub const LOCAL_MAX_APPS: usize = 15;
+pub const LOCAL_MAX_MENUS: usize = 20;
+pub const LOCAL_MAX_TARGETS: usize = 20;
+
 #[derive(Debug, Clone, Default)]
 pub struct Proposal {
     pub apps: Vec<String>,
@@ -26,15 +35,14 @@ pub struct Proposal {
     pub number: Option<u32>,
 }
 
-pub fn propose(utterance: &str, ctx: &DesktopContext) -> Proposal {
+pub fn propose(utterance: &str, ctx: &DesktopContext, profile: Profile) -> Proposal {
+    let (max_apps, max_menus) = match profile {
+        Profile::Jev => (MAX_APP_CANDIDATES, MAX_MENU_CANDIDATES),
+        Profile::Local => (LOCAL_MAX_APPS, LOCAL_MAX_MENUS),
+    };
     Proposal {
-        apps: shortlist_apps(
-            &ctx.installed_apps,
-            &ctx.running_apps,
-            utterance,
-            MAX_APP_CANDIDATES,
-        ),
-        menus: shortlist_menus(&ctx.menu_items, utterance, MAX_MENU_CANDIDATES),
+        apps: shortlist_apps(&ctx.installed_apps, &ctx.running_apps, utterance, max_apps),
+        menus: shortlist_menus(&ctx.menu_items, utterance, max_menus),
         spans: text_spans(utterance),
         number: parse_number(utterance),
     }
@@ -248,6 +256,114 @@ pub fn shortlist_apps(
     scored.into_iter().map(|(_, _, name)| name).collect()
 }
 
+/// Words that fit any request and so say nothing about which action is meant.
+/// Left out are "up", "out", "over" and "on", which do (turn it up, go back,
+/// page up).
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "my", "me", "i", "it", "its", "this", "that", "these", "those", "to", "of",
+    "in", "at", "for", "from", "with", "and", "or", "is", "are", "be", "as", "into", "please",
+    "can", "could", "would", "you", "your", "we", "our", "some", "any", "one",
+];
+
+/// Words people use to ask for an action, for the shortlist only (the model
+/// never sees them). Without them an action whose description says little about
+/// how it's asked for ("go to github.com", "search for flights", "click Save")
+/// loses to whatever the argument's words happen to resemble.
+fn cues(action_id: &str) -> &'static str {
+    match action_id {
+        "open_app" => "launch start run switch bring up app application",
+        "quit_app" => "quit exit close kill terminate stop end app application",
+        "hide_app" => "hide tuck away app application",
+        "open_website" => "go to visit navigate browse head take website site page url address load open",
+        "web_search" => "search google look up find online web query",
+        "click_element" => "click press tap select choose push hit check tick toggle button link tab checkbox field box menu dropdown option switch",
+        "type_text" => "type write say enter words text",
+        "undo" => "undo scratch revert take back",
+        "redo" => "redo again reapply put back",
+        "paste" => "paste clipboard drop",
+        "window_left" => "window left half tile snap side",
+        "window_right" => "window right half tile snap side",
+        "window_maximize" => "window maximize fill screen big bigger enlarge expand",
+        "window_center" => "window center centre middle recenter",
+        "window_next_screen" => "window screen display monitor other second next move send",
+        "window_minimize" => "window minimize dock shrink",
+        "window_fullscreen" => "full screen fullscreen",
+        "sleep_display" => "sleep display screen monitor off blank",
+        "set_volume" => "volume level percent set sound",
+        "volume_up" => "louder up raise increase crank sound volume",
+        "volume_down" => "quieter softer down lower decrease sound volume",
+        "lock_screen" => "lock secure screen computer",
+        "screenshot" => "screenshot capture screen record",
+        _ => "",
+    }
+}
+
+/// How alike two stems must be to count as the same word.
+const MIN_WORD_SIMILARITY: f64 = 0.85;
+
+/// Word stems without stopwords, to match "louder" with "loud" and "tabs"
+/// with "tab".
+fn stems(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !STOPWORDS.contains(word))
+        .map(|word| {
+            ["ing", "es", "s", "ed"]
+                .iter()
+                .find_map(|suffix| word.strip_suffix(suffix).filter(|stem| stem.len() > 2))
+                .unwrap_or(word)
+                .to_string()
+        })
+        .collect()
+}
+
+/// The `cap` actions most likely meant by `utterance`, best first, for a model
+/// that can't weigh dozens of options. An action scores by how closely its
+/// title and description share words with the utterance. The menu command
+/// action also counts the words of the menu commands on offer, since its own
+/// description can't say what the front app's menus hold.
+pub fn shortlist_actions<'a>(
+    actions: &'a [Action],
+    utterance: &str,
+    menu_labels: &[String],
+    cap: usize,
+) -> Vec<&'a Action> {
+    if actions.len() <= cap {
+        return actions.iter().collect();
+    }
+    let query = stems(utterance);
+    let mut scored: Vec<(f64, usize)> = actions
+        .iter()
+        .enumerate()
+        .map(|(order, action)| {
+            let mut text = format!("{} {} {}", action.title, action.what, cues(&action.id));
+            if action.arg == ArgKind::Menu {
+                text.push(' ');
+                text.push_str(&menu_labels.join(" "));
+            }
+            let words = stems(&text);
+            let score = query
+                .iter()
+                .map(|word| {
+                    words
+                        .iter()
+                        .map(|other| strsim::jaro_winkler(word, other))
+                        .fold(0.0, f64::max)
+                })
+                .filter(|&similarity| similarity >= MIN_WORD_SIMILARITY)
+                .map(|similarity| similarity.powi(4))
+                .sum();
+            (score, order)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(cap)
+        .map(|(_, order)| &actions[order])
+        .collect()
+}
+
 /// Every menu command when they fit in one Choice. Otherwise those whose
 /// titles look most like something in the utterance, kept in menu order.
 pub fn shortlist_menus(items: &[MenuItem], utterance: &str, cap: usize) -> Vec<String> {
@@ -383,6 +499,94 @@ mod tests {
         if let (Some(downloads), Some(history)) = (downloads, history) {
             assert!(downloads < history, "menu order is kept");
         }
+    }
+
+    fn action(id: &str, title: &str, what: &str, arg: ArgKind) -> Action {
+        Action {
+            id: id.into(),
+            title: title.into(),
+            what: what.into(),
+            not_for: None,
+            arg,
+            runner: crate::voice_control::registry::Runner::TypeText,
+        }
+    }
+
+    fn sample_actions() -> Vec<Action> {
+        let mut actions = vec![
+            action("mute", "Mute", "Mute the sound", ArgKind::None),
+            action(
+                "volume_up",
+                "Volume up",
+                "Turn the sound up or make it louder",
+                ArgKind::None,
+            ),
+            action(
+                "new_tab",
+                "New tab",
+                "Open a new browser tab",
+                ArgKind::None,
+            ),
+            action(
+                "lock_screen",
+                "Lock screen",
+                "Lock the screen",
+                ArgKind::None,
+            ),
+            action(
+                "menu_command",
+                "Menu command",
+                "Use one of the frontmost app's own menu commands",
+                ArgKind::Menu,
+            ),
+        ];
+        actions.extend((0..20).map(|i| {
+            action(
+                &format!("filler_{i}"),
+                "Filler",
+                "Something unrelated",
+                ArgKind::None,
+            )
+        }));
+        actions
+    }
+
+    #[test]
+    fn action_shortlist_keeps_what_the_words_suggest() {
+        let actions = sample_actions();
+        let ids = |utterance: &str| -> Vec<String> {
+            shortlist_actions(&actions, utterance, &[], 3)
+                .iter()
+                .map(|a| a.id.clone())
+                .collect()
+        };
+        assert_eq!(ids("mute the sound")[0], "mute");
+        assert!(ids("make it louder").contains(&"volume_up".to_string()));
+        assert!(ids("open a new tab").contains(&"new_tab".to_string()));
+        assert_eq!(ids("mute").len(), 3);
+    }
+
+    #[test]
+    fn action_shortlist_keeps_everything_that_fits() {
+        let actions = sample_actions();
+        assert_eq!(
+            shortlist_actions(&actions, "mute", &[], 100).len(),
+            actions.len()
+        );
+    }
+
+    #[test]
+    fn menu_command_scores_by_the_menu_labels_on_offer() {
+        let actions = sample_actions();
+        let labels = vec!["View > Enlarge Text".to_string()];
+        let rank = |labels: &[String]| {
+            shortlist_actions(&actions, "enlarge the text", labels, 10)
+                .iter()
+                .position(|a| a.id == "menu_command")
+                .unwrap_or(usize::MAX)
+        };
+        assert_eq!(rank(&labels), 0);
+        assert!(rank(&[]) > 0);
     }
 
     #[test]

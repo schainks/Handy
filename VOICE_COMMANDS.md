@@ -185,6 +185,39 @@ never become part of the script.
 
 A file with a mistake is ignored as a whole, and the Voice Commands page shows why.
 
+## Local model (experimental)
+
+Jev can be replaced by a small model running on your Mac, so nothing leaves it. Any server that speaks
+the same `POST /v1/systemone` format works. [Laya](https://nandhakishorm.github.io/laya/) is the one
+tried so far.
+
+```sh
+python3.12 -m venv laya-venv && laya-venv/bin/pip install "laya[serve]"
+LAYA_HOST=127.0.0.1 LAYA_PORT=8801 LAYA_DEVICE=cpu LAYA_MODELS=typed-decisions laya-venv/bin/laya-serve
+```
+
+Then point Handy at it. Set the model on the Voice Commands page to `typed-decisions`, and launch Handy with
+`TYPESAFE_ENDPOINT=http://127.0.0.1:8801/v1/systemone` in its environment (`launchctl setenv` for a Finder
+launch). A model whose name doesn't start with `jev` gets the local request, and no API key is needed.
+`VOICE_COMMANDS_ENGINE=jev` or `local` overrides the guess.
+
+A small model can't weigh 50 options, so the local request differs from Jev's:
+
+- The state is the utterance alone, and the model gets a keyword shortlist of 14 actions plus `none`.
+  Apps, menu commands and click targets are capped at 15 to 20 options.
+- Whether it was a command comes from the action answer (probability it wasn't `none`) and a second
+  "command or dictation" question, less a penalty per word, since commands are short. The default
+  0.70 threshold keeps its meaning.
+- "Click this", "click here" and "click that one" go straight to the pointer click, with no model call.
+- A click needs 25% confidence instead of 50%, since probability spreads over up to 20 options.
+
+Run it on the CPU. On Apple's GPU (`LAYA_DEVICE=mps`) it averages faster, but recompiles for each new request
+shape, and a stall of seconds or minutes makes Handy paste the dictation instead.
+
+Untrained, `typed-decisions` scored 21 of 35 commands and 1 of 12 dictations run as commands (about 0.5 s),
+11 of 26 menu commands, and 5 of 13 clicks. The gap to Jev is the model choosing the wrong action, so the
+next step is fine-tuning it on Handy's own decisions.
+
 ## Privacy
 
 Handy is local-first, and this feature is not. With voice commands on, every dictation of

@@ -22,6 +22,9 @@ mod router;
 #[cfg(test)]
 mod eval;
 
+#[cfg(test)]
+mod training_data;
+
 pub use context::DesktopContext;
 pub use jev::DEFAULT_MODEL;
 
@@ -46,6 +49,18 @@ pub const DEFAULT_THRESHOLD: f64 = 0.7;
 const MAX_CLICK_TARGETS: usize = 200;
 /// How sure Jev must be of the item before it's clicked.
 const MIN_TARGET_CONFIDENCE: f64 = 0.5;
+/// The same for a local model, whose probability is spread over up to twenty
+/// options and none, so 0.25 is already five times chance.
+const LOCAL_MIN_TARGET_CONFIDENCE: f64 = 0.25;
+
+/// How sure the model must be of an item before it's clicked.
+fn min_target_confidence(profile: jev::Profile) -> f64 {
+    match profile {
+        jev::Profile::Jev => MIN_TARGET_CONFIDENCE,
+        jev::Profile::Local => LOCAL_MIN_TARGET_CONFIDENCE,
+    }
+}
+
 const CUSTOM_COMMANDS_FILE: &str = "voice_commands.json";
 
 /// One HTTP client for the life of the app: its connection pool keeps the
@@ -177,9 +192,15 @@ pub async fn handle(
     if words == 0 || words > MAX_COMMAND_WORDS {
         return Outcome::Dictation;
     }
-    let Some(api_key) = api_key(settings) else {
-        warn!("Voice commands are on but no TypeSafe API key is set; pasting as dictation");
-        return Outcome::Dictation;
+    let profile = jev::Profile::detect(model(settings));
+    // A local server needs no key; Jev does.
+    let api_key = match (api_key(settings), profile) {
+        (Some(key), _) => key,
+        (None, jev::Profile::Local) => String::new(),
+        (None, jev::Profile::Jev) => {
+            warn!("Voice commands are on but no TypeSafe API key is set; pasting as dictation");
+            return Outcome::Dictation;
+        }
     };
 
     let http = match HTTP.get_or_try_init(jev::http_client) {
@@ -189,9 +210,10 @@ pub async fn handle(
             return Outcome::Dictation;
         }
     };
-    let client = jev::Client::new(http, &endpoint(), &api_key, model(settings), JEV_TIMEOUT);
+    let client = jev::Client::new(http, &endpoint(), &api_key, model(settings), JEV_TIMEOUT)
+        .with_profile(profile);
     let actions = available_actions(app, &ctx);
-    let proposal = candidates::propose(utterance, &ctx);
+    let proposal = candidates::propose(utterance, &ctx, profile);
 
     let route = match router::route(&client, utterance, &ctx, &actions, &proposal).await {
         Ok(route) => route,
@@ -272,7 +294,11 @@ async fn click_by_name(
     let read_ms = started.elapsed().as_millis();
 
     let names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
-    let offered = elements::shortlist(&names, utterance, MAX_CLICK_TARGETS);
+    let cap = match client.profile() {
+        jev::Profile::Jev => MAX_CLICK_TARGETS,
+        jev::Profile::Local => candidates::LOCAL_MAX_TARGETS,
+    };
+    let offered = elements::shortlist(&names, utterance, cap);
     let labels: Vec<String> = offered.iter().map(|&i| items[i].label.clone()).collect();
     let picked = match router::pick_target(client, utterance, ctx, &labels).await {
         Ok(picked) => picked,
@@ -289,7 +315,7 @@ async fn click_by_name(
     let Some((label, confidence)) = picked else {
         return failed("couldn't tell what to click".to_string());
     };
-    if confidence < MIN_TARGET_CONFIDENCE {
+    if confidence < min_target_confidence(client.profile()) {
         return failed(format!("not sure what to click ({confidence:.2})"));
     }
     let Some(index) = labels.iter().position(|l| *l == label).map(|i| offered[i]) else {

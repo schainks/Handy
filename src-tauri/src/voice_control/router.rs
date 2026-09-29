@@ -7,10 +7,15 @@
 //!   menu        choice  which of the frontmost app's menu commands, or none
 //!   text        choice  which proposed span of the utterance is the argument
 //! Code reads only the answers the chosen action needs.
+//!
+//! A small local model gets a leaner request (`build_local_request`): the
+//! utterance alone as the state, a shortlist of actions, and no `is_command`
+//! question. Whether it was a command is read off the action question, as
+//! the probability that the answer wasn't `none`.
 
-use super::candidates::Proposal;
+use super::candidates::{self, Proposal, LOCAL_MAX_ACTIONS};
 use super::context::DesktopContext;
-use super::jev;
+use super::jev::{self, Profile};
 use super::registry::{Action, ArgKind};
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant};
@@ -157,6 +162,125 @@ pub fn build_request(
     (state, questions)
 }
 
+/// The lean request for a small local model. The state is the utterance
+/// itself, since every extra line of context dilutes it, and every question
+/// lists its options as text, since the model reads only that.
+pub fn build_local_request(
+    utterance: &str,
+    actions: &[&Action],
+    proposal: &Proposal,
+) -> (Value, Value) {
+    // The action question decides whether an app, menu command or text is
+    // needed, so these only choose among the options; none isn't offered.
+    let options = |labels: &[String]| -> Map<String, Value> {
+        labels
+            .iter()
+            .map(|label| (label.clone(), json!(label)))
+            .collect()
+    };
+
+    let mut action_criteria = Map::new();
+    for action in actions {
+        action_criteria.insert(action.id.clone(), json!(action.what));
+    }
+    action_criteria.insert(
+        NONE.into(),
+        json!("Not a computer command: text the user is dictating to be typed"),
+    );
+    let mut questions = json!({
+        "action": {
+            "type": "choice",
+            "instructions": "What should the computer do for this utterance?",
+            "criteria": action_criteria,
+        },
+        "command": {
+            "type": "choice",
+            "instructions": "Is this a command for the computer or text to type?",
+            "criteria": {
+                "command": "The user is telling the computer to do something now, such as open an app, click, scroll, change volume, press a key",
+                "dictation": "The user is dictating text to be typed, such as a sentence, message or note",
+            },
+        },
+    });
+
+    if !proposal.apps.is_empty() {
+        questions["app"] = json!({
+            "type": "choice",
+            "instructions": "Which application does the utterance name?",
+            "criteria": options(&proposal.apps),
+        });
+    }
+    if !proposal.menus.is_empty() {
+        questions["menu"] = json!({
+            "type": "choice",
+            "instructions": "Which menu command does the utterance ask for? Entries are menu paths.",
+            "criteria": options(&proposal.menus),
+        });
+    }
+    if !proposal.spans.is_empty() {
+        let mut criteria = Map::new();
+        for (i, span) in proposal.spans.iter().enumerate() {
+            criteria.insert(span_key(i), json!(span));
+        }
+        questions["text"] = json!({
+            "type": "choice",
+            "instructions": "Which part of the utterance is the text to search for, open or type?",
+            "criteria": criteria,
+        });
+    }
+    (json!(utterance), questions)
+}
+
+/// A local model's own signals are weak alone, but the probability that the
+/// action wasn't `none`, times the probability that it's a command rather than
+/// dictation, less a penalty per word (commands are short, dictation isn't),
+/// separates them well. The offset puts the operating point at the default
+/// 0.7 threshold, so that setting keeps its meaning. Fit on a held-out set of
+/// 158 commands and 60 tricky dictations.
+const LOCAL_GATE_WORDS: f64 = 40.0;
+const LOCAL_GATE_OFFSET: f64 = 0.48;
+
+fn local_gate(response: &jev::Response, utterance: &str) -> f64 {
+    let action = command_probability(response);
+    let command = response
+        .answer("command")
+        .and_then(|answer| answer.probabilities.get("command").copied())
+        .unwrap_or(1.0);
+    let words = utterance.split_whitespace().count() as f64;
+    (action * command - words / LOCAL_GATE_WORDS + LOCAL_GATE_OFFSET).clamp(0.0, 1.0)
+}
+
+/// "Click this", "click here", "press that one": the pointer click, which is a
+/// closed set of phrases, so a small local model isn't asked.
+fn is_pointer_click(utterance: &str) -> bool {
+    let lower = utterance.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    matches!(
+        words.as_slice(),
+        ["click" | "tap" | "press", "this" | "here" | "that" | "it"]
+            | ["click" | "tap" | "press", "this" | "that", "one"]
+    )
+}
+
+/// P(command): a server that asks `is_command` answers it directly. A local
+/// one is read off the action question, as the probability that the answer
+/// wasn't `none`.
+fn command_probability(response: &jev::Response) -> f64 {
+    if let Some(noul) = response.answer("is_command").and_then(|a| a.noul) {
+        return noul;
+    }
+    let Some(action) = response.answer("action") else {
+        return 0.0;
+    };
+    match action.probabilities.get(NONE) {
+        Some(none) => (1.0 - none).clamp(0.0, 1.0),
+        None => f64::from(action.choice.as_deref().is_some_and(|c| c != NONE)),
+    }
+}
+
 pub fn interpret(response: &jev::Response, proposal: &Proposal, latency: Duration) -> Route {
     let picked = |question: &str| {
         response
@@ -175,10 +299,7 @@ pub fn interpret(response: &jev::Response, proposal: &Proposal, latency: Duratio
     });
 
     Route {
-        is_command: response
-            .answer("is_command")
-            .and_then(|answer| answer.noul)
-            .unwrap_or(0.0),
+        is_command: command_probability(response),
         action: picked("action"),
         action_confidence: response
             .answer("action")
@@ -223,14 +344,44 @@ pub fn build_target_request(
     (state, questions)
 }
 
-/// The label Jev picked and how sure it is, if it picked one of `labels`.
-pub fn interpret_target(response: &jev::Response, labels: &[String]) -> Option<(String, f64)> {
+/// The lean form of the click request for a small local model.
+pub fn build_local_target_request(utterance: &str, labels: &[String]) -> (Value, Value) {
+    let mut criteria: Map<String, Value> = labels
+        .iter()
+        .map(|label| (label.clone(), json!(label)))
+        .collect();
+    criteria.insert(
+        NONE.into(),
+        json!("Nothing in this list is what the utterance asks to click"),
+    );
+    let questions = json!({
+        "target": {
+            "type": "choice",
+            "instructions": "Which item on the screen does the utterance ask to click, press, open or select? Each item is its text and its kind.",
+            "criteria": criteria,
+        }
+    });
+    (json!(utterance), questions)
+}
+
+/// The label picked and how sure the model is, if it picked one of `labels`.
+/// Jev reports its own confidence. A local model is as sure as the
+/// probability it gave the pick.
+pub fn interpret_target(
+    response: &jev::Response,
+    labels: &[String],
+    profile: Profile,
+) -> Option<(String, f64)> {
     let answer = response.answer("target")?;
     let label = answer
         .choice
         .clone()
         .filter(|label| label != NONE && labels.contains(label))?;
-    Some((label, answer.confidence.unwrap_or(0.0)))
+    let confidence = match profile {
+        Profile::Jev => answer.confidence,
+        Profile::Local => answer.probabilities.get(&label).copied(),
+    };
+    Some((label, confidence.unwrap_or(0.0)))
 }
 
 pub async fn pick_target(
@@ -239,9 +390,12 @@ pub async fn pick_target(
     ctx: &DesktopContext,
     labels: &[String],
 ) -> Result<Option<(String, f64)>, String> {
-    let (state, questions) = build_target_request(utterance, ctx, labels);
+    let (state, questions) = match client.profile() {
+        Profile::Jev => build_target_request(utterance, ctx, labels),
+        Profile::Local => build_local_target_request(utterance, labels),
+    };
     let response = client.ask(&state, &questions).await?;
-    Ok(interpret_target(&response, labels))
+    Ok(interpret_target(&response, labels, client.profile()))
 }
 
 pub async fn route(
@@ -251,10 +405,33 @@ pub async fn route(
     actions: &[Action],
     proposal: &Proposal,
 ) -> Result<Route, String> {
-    let (state, questions) = build_request(utterance, ctx, actions, proposal);
+    if client.profile() == Profile::Local && is_pointer_click(utterance) {
+        return Ok(Route {
+            is_command: 1.0,
+            action: Some("click_pointer".to_string()),
+            action_confidence: 1.0,
+            ..Default::default()
+        });
+    }
+    let (state, questions) = match client.profile() {
+        Profile::Jev => build_request(utterance, ctx, actions, proposal),
+        Profile::Local => {
+            let shortlist = candidates::shortlist_actions(
+                actions,
+                utterance,
+                &proposal.menus,
+                LOCAL_MAX_ACTIONS,
+            );
+            build_local_request(utterance, &shortlist, proposal)
+        }
+    };
     let started = Instant::now();
     let response = client.ask(&state, &questions).await?;
-    Ok(interpret(&response, proposal, started.elapsed()))
+    let mut route = interpret(&response, proposal, started.elapsed());
+    if client.profile() == Profile::Local {
+        route.is_command = local_gate(&response, utterance);
+    }
+    Ok(route)
 }
 
 /// Run the chosen action whenever Jev is at least `threshold` sure the
@@ -363,6 +540,136 @@ mod tests {
         }
     }
 
+    /// A choice answer with its probabilities, as a local model sends them.
+    fn distribution(pick: &str, probabilities: &[(&str, f64)]) -> jev::Answer {
+        jev::Answer {
+            choice: Some(pick.into()),
+            probabilities: probabilities
+                .iter()
+                .map(|(k, p)| (k.to_string(), *p))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn local_request_is_lean_and_lists_its_options_as_text() {
+        let actions = builtin(&safari());
+        let shortlist =
+            candidates::shortlist_actions(&actions, "show my downloads", &proposal().menus, 14);
+        let (state, questions) = build_local_request("show my downloads", &shortlist, &proposal());
+
+        assert_eq!(state, json!("show my downloads"));
+        assert!(questions.get("is_command").is_none());
+        assert!(questions.get("command").is_some());
+        let options = questions["action"]["criteria"].as_object().unwrap();
+        assert_eq!(options.len(), 14 + 1, "the shortlist plus none");
+        assert!(options.contains_key("menu_command"));
+        assert!(options["none"].as_str().unwrap().contains("dictating"));
+        // Every option carries its own text, since the model reads only that.
+        let apps = questions["app"]["criteria"].as_object().unwrap();
+        assert_eq!(apps["Safari"], json!("Safari"));
+        let spans = questions["text"]["criteria"].as_object().unwrap();
+        assert_eq!(spans["t2"], json!("cats"));
+    }
+
+    #[test]
+    fn local_gate_needs_a_command_that_is_short() {
+        let answers = |none: f64, command: f64| {
+            response(&[
+                (
+                    "action",
+                    distribution("mute", &[("mute", 1.0 - none), ("none", none)]),
+                ),
+                (
+                    "command",
+                    distribution(
+                        "command",
+                        &[("command", command), ("dictation", 1.0 - command)],
+                    ),
+                ),
+            ])
+        };
+        // A moderately sure model is settled by length.
+        let unsure = answers(0.3, 0.6);
+        assert!(local_gate(&unsure, "mute the sound") > 0.7);
+        assert!(
+            local_gate(
+                &unsure,
+                "the volume of sales went up last month and we should mute the noise"
+            ) < 0.7
+        );
+        assert!(local_gate(&answers(0.02, 0.9), "mute the sound") > 0.7);
+        // A model that leans toward none or dictation is not sure enough.
+        assert!(local_gate(&answers(0.8, 0.9), "mute the sound") < 0.7);
+        assert!(local_gate(&answers(0.02, 0.2), "mute the sound") < 0.7);
+        assert!((0.0..=1.0).contains(&local_gate(&answers(0.0, 1.0), "mute")));
+    }
+
+    #[test]
+    fn a_local_target_is_as_sure_as_its_probability() {
+        let labels = vec!["Octopus (link)".to_string(), "Squid (link)".to_string()];
+        let answer = jev::Answer {
+            confidence: Some(0.95),
+            ..distribution("Octopus (link)", &[("Octopus (link)", 0.4), ("none", 0.6)])
+        };
+        let response = response(&[("target", answer)]);
+        assert_eq!(
+            interpret_target(&response, &labels, Profile::Local),
+            Some(("Octopus (link)".to_string(), 0.4))
+        );
+        assert_eq!(
+            interpret_target(&response, &labels, Profile::Jev),
+            Some(("Octopus (link)".to_string(), 0.95))
+        );
+    }
+
+    #[test]
+    fn pointer_clicks_are_a_closed_set_of_phrases() {
+        for yes in [
+            "Click this",
+            "click here.",
+            "Press that one",
+            "tap it",
+            "Click that!",
+        ] {
+            assert!(is_pointer_click(yes), "{yes}");
+        }
+        for no in [
+            "click cephalopods",
+            "click here to unsubscribe",
+            "click",
+            "this is a test",
+        ] {
+            assert!(!is_pointer_click(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn local_argument_questions_offer_no_none() {
+        let actions = builtin(&ctx());
+        let shortlist = candidates::shortlist_actions(&actions, "open safari", &[], 14);
+        let (_, questions) = build_local_request("open safari", &shortlist, &proposal());
+        for question in ["app", "menu", "text"] {
+            let options = questions[question]["criteria"].as_object().unwrap();
+            assert!(!options.contains_key("none"), "{question}");
+        }
+        assert!(questions["action"]["criteria"]
+            .as_object()
+            .unwrap()
+            .contains_key("none"));
+    }
+
+    #[test]
+    fn local_target_request_states_only_the_utterance() {
+        let labels = vec!["Octopus (link)".to_string()];
+        let (state, questions) = build_local_target_request("click octopus", &labels);
+        assert_eq!(state, json!("click octopus"));
+        let options = questions["target"]["criteria"].as_object().unwrap();
+        assert_eq!(options["Octopus (link)"], json!("Octopus (link)"));
+        assert!(options.contains_key("none"));
+    }
+
     fn route_for(answers: &[(&str, jev::Answer)]) -> Route {
         interpret(&response(answers), &proposal(), Duration::ZERO)
     }
@@ -429,7 +736,13 @@ mod tests {
         assert_eq!(criteria.len(), 3, "two items plus none");
         assert!(criteria["Octopus (link)"].is_null());
 
-        let picked = |pick: &str| interpret_target(&response(&[("target", choice(pick))]), &labels);
+        let picked = |pick: &str| {
+            interpret_target(
+                &response(&[("target", choice(pick))]),
+                &labels,
+                Profile::Jev,
+            )
+        };
         assert_eq!(
             picked("Octopus (link)"),
             Some(("Octopus (link)".to_string(), 0.9))

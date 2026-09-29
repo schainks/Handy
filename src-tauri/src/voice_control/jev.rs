@@ -15,6 +15,41 @@ use std::time::Duration;
 pub const DEFAULT_MODEL: &str = "jev-1.13.0";
 pub const DEFAULT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
+/// Which kind of System One server answers. Both speak the same wire format,
+/// but a small local model needs a leaner request: a short state and no more
+/// than a couple dozen options per question, where Jev takes hundreds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Profile {
+    #[default]
+    Jev,
+    Local,
+}
+
+impl Profile {
+    /// `VOICE_COMMANDS_ENGINE` (`jev` or `local`) wins. Otherwise a model whose
+    /// name isn't a Jev release ("typed-decisions", "clm-latest") is a local one.
+    pub fn detect(model: &str) -> Self {
+        match std::env::var("VOICE_COMMANDS_ENGINE")
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
+            "jev" => Self::Jev,
+            "local" => Self::Local,
+            _ => Self::for_model(model),
+        }
+    }
+
+    pub fn for_model(model: &str) -> Self {
+        if model.trim().to_lowercase().starts_with("jev") {
+            Self::Jev
+        } else {
+            Self::Local
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
@@ -32,6 +67,9 @@ pub struct Answer {
     pub confidence: Option<f64>,
     #[serde(default)]
     pub noul: Option<f64>,
+    /// A choice's probability for every option, when the server sends them.
+    #[serde(default)]
+    pub probabilities: HashMap<String, f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -68,6 +106,7 @@ pub struct Client {
     api_key: String,
     model: String,
     timeout: Duration,
+    profile: Profile,
 }
 
 impl Client {
@@ -84,7 +123,17 @@ impl Client {
             api_key: api_key.to_string(),
             model: model.to_string(),
             timeout,
+            profile: Profile::Jev,
         }
+    }
+
+    pub fn with_profile(mut self, profile: Profile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub fn profile(&self) -> Profile {
+        self.profile
     }
 
     pub async fn ask(&self, state: &Value, questions: &Value) -> Result<Response, String> {
@@ -134,6 +183,14 @@ fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_models_are_recognized_by_name() {
+        assert_eq!(Profile::for_model("jev-1.13.0"), Profile::Jev);
+        assert_eq!(Profile::for_model("Jev-latest"), Profile::Jev);
+        assert_eq!(Profile::for_model("typed-decisions"), Profile::Local);
+        assert_eq!(Profile::for_model("clm-latest"), Profile::Local);
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

@@ -183,21 +183,31 @@ fn percentile(sorted: &[u128], p: f64) -> u128 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
-/// The live client, model and threshold, from the environment.
+/// The live client, model and threshold, from the environment. `TYPESAFE_ENDPOINT`
+/// points it at another System One server, such as a local CLM.
 fn live_client() -> (jev::Client, String, f64) {
-    let api_key = std::env::var("TYPESAFE_API_KEY").expect("TYPESAFE_API_KEY is not set");
     let model = std::env::var("TYPESAFE_MODEL").unwrap_or_else(|_| jev::DEFAULT_MODEL.into());
+    let profile = jev::Profile::detect(&model);
+    let api_key = match profile {
+        jev::Profile::Jev => {
+            std::env::var("TYPESAFE_API_KEY").expect("TYPESAFE_API_KEY is not set")
+        }
+        jev::Profile::Local => std::env::var("TYPESAFE_API_KEY").unwrap_or_default(),
+    };
     let threshold: f64 = std::env::var("VOICE_COMMANDS_THRESHOLD")
         .ok()
         .and_then(|t| t.parse().ok())
         .unwrap_or(super::DEFAULT_THRESHOLD);
+    let endpoint =
+        std::env::var("TYPESAFE_ENDPOINT").unwrap_or_else(|_| jev::DEFAULT_ENDPOINT.into());
     let client = jev::Client::new(
         jev::http_client().unwrap(),
-        jev::DEFAULT_ENDPOINT,
+        &endpoint,
         &api_key,
         &model,
         Duration::from_secs(10),
-    );
+    )
+    .with_profile(profile);
     (client, model, threshold)
 }
 
@@ -217,7 +227,7 @@ fn live_routing_eval() {
         actions.len()
     );
     for (utterance, expected_action, expected_arg) in CASES {
-        let proposal = candidates::propose(utterance, &ctx);
+        let proposal = candidates::propose(utterance, &ctx, client.profile());
         let route = tauri::async_runtime::block_on(router::route(
             &client, utterance, &ctx, &actions, &proposal,
         ))
@@ -797,7 +807,7 @@ fn live_menu_eval() {
     for (app, utterance, expected) in MENU_CASES {
         let ctx = desktop_with_front(app);
         let actions = registry::builtin(&ctx);
-        let proposal = candidates::propose(utterance, &ctx);
+        let proposal = candidates::propose(utterance, &ctx, client.profile());
         let route = tauri::async_runtime::block_on(router::route(
             &client, utterance, &ctx, &actions, &proposal,
         ))
@@ -959,7 +969,7 @@ fn live_click_eval() {
         screen.len()
     );
     for (utterance, expected) in CLICK_CASES {
-        let proposal = candidates::propose(utterance, &ctx);
+        let proposal = candidates::propose(utterance, &ctx, client.profile());
         let route = tauri::async_runtime::block_on(router::route(
             &client, utterance, &ctx, &actions, &proposal,
         ))
@@ -979,7 +989,9 @@ fn live_click_eval() {
                 .unwrap_or_else(|e| panic!("picking for '{utterance}' failed: {e}"));
                 latency += started.elapsed().as_millis();
                 Some(match picked {
-                    Some((label, confidence)) if confidence >= super::MIN_TARGET_CONFIDENCE => {
+                    Some((label, confidence))
+                        if confidence >= super::min_target_confidence(client.profile()) =>
+                    {
                         label
                     }
                     Some((label, confidence)) => format!("unsure: {label} ({confidence:.2})"),
