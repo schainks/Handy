@@ -72,6 +72,9 @@ const DENIED_PREFIXES: &[&str] = &[
     "empty",
     "revert",
     "discard",
+    "move to trash",
+    "delete",
+    "remove",
 ];
 
 fn normalized(title: &str) -> String {
@@ -508,6 +511,23 @@ mod tests {
             ),
         ]);
         assert_eq!(found, vec!["Edit > Copy"]);
+    }
+
+    #[test]
+    fn items_that_delete_are_never_offered() {
+        let found = labels(&[
+            menu("Apple", vec![]),
+            menu(
+                "File",
+                vec![
+                    leaf("New Window"),
+                    leaf("Move to Trash"),
+                    leaf("Delete Conversation…"),
+                    leaf("Remove from Favorites"),
+                ],
+            ),
+        ]);
+        assert_eq!(found, vec!["File > New Window"]);
     }
 
     #[test]

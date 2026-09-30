@@ -405,13 +405,30 @@ pub async fn route(
     actions: &[Action],
     proposal: &Proposal,
 ) -> Result<Route, String> {
-    if client.profile() == Profile::Local && is_pointer_click(utterance) {
-        return Ok(Route {
-            is_command: 1.0,
-            action: Some("click_pointer".to_string()),
-            action_confidence: 1.0,
-            ..Default::default()
-        });
+    if client.profile() == Profile::Local {
+        if is_pointer_click(utterance) {
+            return Ok(Route {
+                is_command: 1.0,
+                action: Some("click_pointer".to_string()),
+                action_confidence: 1.0,
+                ..Default::default()
+            });
+        }
+        let apps: Vec<String> = ctx
+            .running_apps
+            .iter()
+            .chain(&ctx.installed_apps)
+            .cloned()
+            .collect();
+        if let Some((action, app)) = candidates::named_app_command(utterance, &apps) {
+            return Ok(Route {
+                is_command: 1.0,
+                action: Some(action.to_string()),
+                action_confidence: 1.0,
+                app: Some(app),
+                ..Default::default()
+            });
+        }
     }
     let (state, questions) = match client.profile() {
         Profile::Jev => build_request(utterance, ctx, actions, proposal),

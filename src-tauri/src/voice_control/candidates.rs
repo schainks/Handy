@@ -256,6 +256,84 @@ pub fn shortlist_apps(
     scored.into_iter().map(|(_, _, name)| name).collect()
 }
 
+/// Letters and digits only, lowercase: "Text Edit", "text-edit" and "TextEdit" match.
+fn compact(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Verb phrases that ask for an app, and the action each one means. Longest first.
+const APP_VERBS: &[(&[&str], &str)] = &[
+    (&["take", "me", "to"], "open_app"),
+    (&["switch", "over", "to"], "open_app"),
+    (&["jump", "over", "to"], "open_app"),
+    (&["switch", "to"], "open_app"),
+    (&["bring", "up"], "open_app"),
+    (&["pull", "up"], "open_app"),
+    (&["fire", "up"], "open_app"),
+    (&["open", "up"], "open_app"),
+    (&["go", "to"], "open_app"),
+    (&["open"], "open_app"),
+    (&["launch"], "open_app"),
+    (&["start"], "open_app"),
+    (&["run"], "open_app"),
+    (&["activate"], "open_app"),
+    (&["quit"], "quit_app"),
+    (&["exit"], "quit_app"),
+    (&["terminate"], "quit_app"),
+    (&["kill"], "quit_app"),
+    (&["hide"], "hide_app"),
+];
+const LEADING_FILLER: &[&str] = &[
+    "please", "can", "could", "you", "hey", "okay", "ok", "so", "just", "quickly",
+];
+const TRAILING_FILLER: &[&str] = &["please", "now", "thanks", "for", "me"];
+
+/// "Open Safari", "quit text edit", "hide Messages": an app named exactly,
+/// spaces and case aside, needs no model. It can't know which apps are on this
+/// Mac, and speech-to-text splits names like TextEdit into two words.
+/// Returns the action and the app's own name.
+pub fn named_app_command(utterance: &str, apps: &[String]) -> Option<(&'static str, String)> {
+    let lower = utterance.to_lowercase();
+    let mut words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '.')
+        .map(|word| word.trim_matches('.'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    while words
+        .first()
+        .is_some_and(|word| LEADING_FILLER.contains(word))
+    {
+        words.remove(0);
+    }
+    if words.starts_with(&["go", "ahead", "and"]) {
+        words.drain(..3);
+    }
+    let (verb, action) = APP_VERBS.iter().find(|(verb, _)| words.starts_with(verb))?;
+    let mut rest = &words[verb.len()..];
+    if rest.first() == Some(&"the") {
+        rest = &rest[1..];
+    }
+    while rest
+        .last()
+        .is_some_and(|word| TRAILING_FILLER.contains(word))
+    {
+        rest = &rest[..rest.len() - 1];
+    }
+    if matches!(rest.last(), Some(&"app") | Some(&"application")) {
+        rest = &rest[..rest.len() - 1];
+    }
+    if rest.is_empty() || rest.len() > 4 {
+        return None;
+    }
+    let spoken = compact(&rest.concat());
+    apps.iter()
+        .find(|app| !spoken.is_empty() && compact(app) == spoken)
+        .map(|app| (*action, app.clone()))
+}
+
 /// Words that fit any request and so say nothing about which action is meant.
 /// Left out are "up", "out", "over" and "on", which do (turn it up, go back,
 /// page up).
@@ -499,6 +577,32 @@ mod tests {
         if let (Some(downloads), Some(history)) = (downloads, history) {
             assert!(downloads < history, "menu order is kept");
         }
+    }
+
+    #[test]
+    fn apps_named_aloud_are_matched_ignoring_spaces_and_case() {
+        let apps = strings(&["TextEdit", "Safari", "System Settings", "Notes", "zoom.us"]);
+        let said = |utterance: &str| named_app_command(utterance, &apps);
+        let open = |app: &str| Some(("open_app", app.to_string()));
+        assert_eq!(said("Open text edit."), open("TextEdit"));
+        assert_eq!(said("please launch Safari"), open("Safari"));
+        assert_eq!(
+            said("Switch to the system settings app"),
+            open("System Settings")
+        );
+        assert_eq!(said("quit notes"), Some(("quit_app", "Notes".to_string())));
+        assert_eq!(
+            said("Hide Safari for me"),
+            Some(("hide_app", "Safari".to_string()))
+        );
+        assert_eq!(said("go ahead and open zoom.us"), open("zoom.us"));
+        // Not an app, or more than an app: left to the model.
+        assert_eq!(said("open trash"), None);
+        assert_eq!(said("open the notes from yesterday"), None);
+        assert_eq!(said("go to github.com"), None);
+        assert_eq!(said("safari"), None);
+        assert_eq!(said("open"), None);
+        assert_eq!(said("Close this tab"), None);
     }
 
     fn action(id: &str, title: &str, what: &str, arg: ArgKind) -> Action {
