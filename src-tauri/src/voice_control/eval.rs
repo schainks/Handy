@@ -838,10 +838,11 @@ fn live_menu_eval() {
             }
         }
         println!(
-            "{} [{app:<8}] {:<60} p(cmd)={:.2} -> {} [{} menu commands, {} ms]",
+            "{} [{app:<8}] {:<60} p(cmd)={:.2} menu p={:.2} -> {} [{} menu commands, {} ms]",
             if ok { "ok  " } else { "MISS" },
             utterance,
             route.is_command,
+            route.menu_confidence,
             got.as_deref().unwrap_or("dictation"),
             proposal.menus.len(),
             route.latency.as_millis(),

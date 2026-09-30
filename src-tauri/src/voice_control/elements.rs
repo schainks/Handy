@@ -139,8 +139,9 @@ mod platform {
     const BUDGET: Duration = Duration::from_millis(1500);
     /// A page that came back empty is read once more after this pause, if the
     /// first pass took less than `RETRY_UNTIL`.
-    const RETRY_DELAY: Duration = Duration::from_millis(250);
-    const RETRY_UNTIL: Duration = Duration::from_millis(1000);
+    const RETRY_DELAY: Duration = Duration::from_millis(400);
+    const RETRY_UNTIL: Duration = Duration::from_millis(2500);
+    const MAX_RETRIES: usize = 4;
     /// Window controls (toolbar, tab bar, sidebars) around the page.
     const MAX_WINDOW_NODES: usize = 600;
     const MAX_WINDOW_DEPTH: usize = 12;
@@ -407,14 +408,22 @@ mod platform {
         // Accessibility tree only once an app asks for it; others ignore this.
         let _ = app.set_flag("AXManualAccessibility", true);
 
-        let mut pass = read_window(front_window(&app)?, started);
-        // A page that just loaded, or a browser building its tree for the
-        // first time, answers with nothing at first. Ask once more.
-        if pass.shows_page && pass.from_pages == 0 && started.elapsed() < RETRY_UNTIL {
+        let mut pass = read_window(front_window(&app)?, Instant::now());
+        // A page still loading, or a browser building its tree for the first
+        // time, answers with nothing at first ("go to wikipedia.org", then
+        // "click the search box" a few seconds later). Keep asking for a while.
+        let mut retries = 0;
+        while pass.shows_page
+            && pass.from_pages == 0
+            && retries < MAX_RETRIES
+            && started.elapsed() < RETRY_UNTIL
+        {
+            retries += 1;
             std::thread::sleep(RETRY_DELAY);
-            let again = read_window(front_window(&app)?, started);
+            let again = read_window(front_window(&app)?, Instant::now());
             if again.from_pages > 0 {
                 pass = again;
+                break;
             }
         }
         let found = pass.found;

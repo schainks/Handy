@@ -223,13 +223,14 @@ pub async fn handle(
         }
     };
     info!(
-        "Voice command routing: is_command={:.2} action={} ({:.2}) app={:?} menu={:?} text={:?} in {} ms ({} menu commands offered, {}, {} input tokens)",
+        "Voice command routing: is_command={:.2} action={} ({:.2}) app={:?} menu={:?} ({:.2}) text={:?} in {} ms ({} menu commands offered, {}, {} input tokens)",
         route.is_command,
         route.action.as_deref().unwrap_or("none"),
         route.action_confidence,
         route.app.as_deref().map(redact_text),
         // Menu labels come from the app, not from speech.
         route.menu.as_deref(),
+        route.menu_confidence,
         route.text.as_deref().map(redact_text),
         route.latency.as_millis(),
         proposal.menus.len(),

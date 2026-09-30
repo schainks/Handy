@@ -87,7 +87,10 @@ fn normalized(title: &str) -> String {
 }
 
 pub fn skip_submenu(title: &str) -> bool {
-    SKIPPED_SUBMENUS.contains(&normalized(title).as_str())
+    let title = normalized(title);
+    // "Open Recent", "Recent Folders", "Recently Closed"...: whatever the
+    // app calls it, a list of recent things is the user's own content.
+    title.contains("recent") || SKIPPED_SUBMENUS.contains(&title.as_str())
 }
 
 pub fn is_list_menu(title: &str) -> bool {
@@ -511,6 +514,26 @@ mod tests {
             ),
         ]);
         assert_eq!(found, vec!["Edit > Copy"]);
+    }
+
+    #[test]
+    fn any_recent_list_is_skipped() {
+        let found = labels(&[
+            menu("Apple", vec![]),
+            menu(
+                "Go",
+                vec![
+                    leaf("Home"),
+                    RawItem {
+                        title: "Recent Folders".into(),
+                        enabled: true,
+                        has_shortcut: false,
+                        submenu: Some(vec![leaf("Taxes"), leaf("Passwords")]),
+                    },
+                ],
+            ),
+        ]);
+        assert_eq!(found, vec!["Go > Home"]);
     }
 
     #[test]

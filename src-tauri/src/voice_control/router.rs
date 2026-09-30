@@ -32,6 +32,8 @@ pub struct Route {
     pub app: Option<String>,
     /// Label of the frontmost app's menu command Jev picked.
     pub menu: Option<String>,
+    /// How sure the model was of that menu command (its probability).
+    pub menu_confidence: f64,
     pub text: Option<String>,
     pub latency: Duration,
     pub model: Option<String>,
@@ -265,6 +267,59 @@ fn is_pointer_click(utterance: &str) -> bool {
     )
 }
 
+/// How sure a local model must be of a menu command before it is pressed.
+const LOCAL_MIN_MENU_CONFIDENCE: f64 = 0.75;
+
+/// Sentences that are plainly said to a person, not to the computer: "Let's run
+/// this whole test", "Can we do left justified text?", "I think we should...".
+/// The trained model is overconfident on these, so a few openings that
+/// commands don't have decide it outright. "I want you to open Safari" is a
+/// command and stays one.
+fn looks_like_dictation(utterance: &str) -> bool {
+    let lower = utterance.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() < 4 {
+        return false;
+    }
+    const ASKING_YOU_TO: &[&[&str]] = &[
+        &["i", "want", "you", "to"],
+        &["i", "need", "you", "to"],
+        &["i'd", "like", "you", "to"],
+        &["i", "would", "like", "you", "to"],
+    ];
+    if ASKING_YOU_TO
+        .iter()
+        .any(|opening| words.starts_with(opening))
+    {
+        return false;
+    }
+    const OPENINGS: &[&[&str]] = &[
+        &["can", "we"],
+        &["could", "we"],
+        &["should", "we"],
+        &["shall", "we"],
+        &["do", "we"],
+        &["are", "we"],
+        &["is", "it"],
+        &["is", "there"],
+        &["do", "you"],
+        &["did", "you"],
+        &["are", "you"],
+        &["have", "you"],
+        &["this", "is"],
+        &["that", "is"],
+    ];
+    const FIRST_WORDS: &[&str] = &[
+        "let's", "lets", "why", "how", "who", "whose", "when", "where", "which", "what", "we",
+        "we're", "i", "i'm", "i've", "i'll", "it's", "that's", "there's", "here's", "they", "he",
+        "she", "my", "our",
+    ];
+    OPENINGS.iter().any(|opening| words.starts_with(opening)) || FIRST_WORDS.contains(&words[0])
+}
+
 /// A small model asked "which app?" always names one, even when the utterance
 /// named none ("turn off Wi Fi" became "quit MacWhisper"). An action that acts
 /// on an app only runs if that app was actually spoken; otherwise it has no
@@ -330,6 +385,17 @@ pub fn interpret(response: &jev::Response, proposal: &Proposal, latency: Duratio
             .unwrap_or(0.0),
         app: picked("app").filter(|app| proposal.apps.contains(app)),
         menu: picked("menu").filter(|label| proposal.menus.contains(label)),
+        menu_confidence: response
+            .answer("menu")
+            .map(|answer| {
+                answer
+                    .choice
+                    .as_ref()
+                    .and_then(|label| answer.probabilities.get(label).copied())
+                    .or(answer.confidence)
+                    .unwrap_or(0.0)
+            })
+            .unwrap_or(0.0),
         text,
         latency,
         model: response.model.clone(),
@@ -470,7 +536,15 @@ pub async fn route(
     let mut route = interpret(&response, proposal, started.elapsed());
     if client.profile() == Profile::Local {
         route.is_command = local_gate(&response, utterance);
+        if looks_like_dictation(utterance) {
+            route.is_command = 0.0;
+        }
         require_spoken_app(&mut route, utterance, actions);
+        // The menu question has no none option, so it always picks something:
+        // "open text" became Sort By > None. A pick it isn't sure of is dropped.
+        if route.menu_confidence < LOCAL_MIN_MENU_CONFIDENCE {
+            route.menu = None;
+        }
     }
     Ok(route)
 }
@@ -663,6 +737,34 @@ mod tests {
             interpret_target(&response, &labels, Profile::Jev),
             Some(("Octopus (link)".to_string(), 0.95))
         );
+    }
+
+    #[test]
+    fn sentences_said_to_a_person_are_dictation() {
+        for yes in [
+            "Let's run this whole test.",
+            "Can we do left justified text?",
+            "Why is the justification on the right?",
+            "I think we should open the discussion first.",
+            "We should close the deal before Friday.",
+            "It's a beautiful day to go outside.",
+            "This is a demo of using Handy offline.",
+        ] {
+            assert!(looks_like_dictation(yes), "{yes}");
+        }
+        for no in [
+            "Open Safari.",
+            "Can you open Safari?",
+            "I want you to lock the screen.",
+            "Turn the Wi Fi off.",
+            "Move this window to the left half.",
+            "A bit louder.",
+            "Quit text edit.",
+            "Hey, mute it please.",
+            "Show my downloads.",
+        ] {
+            assert!(!looks_like_dictation(no), "{no}");
+        }
     }
 
     #[test]
