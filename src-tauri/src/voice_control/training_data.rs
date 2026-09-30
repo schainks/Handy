@@ -17,7 +17,7 @@ use super::context::DesktopContext;
 use super::elements;
 use super::jev::Profile;
 use super::menus::MenuItem;
-use super::registry::{self, ArgKind};
+use super::registry::{self, Action, ArgKind, Runner};
 use super::router;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -34,13 +34,25 @@ struct Scenario {
     #[serde(default)]
     menus: Vec<Vec<String>>,
     hammerspoon: bool,
+    /// The user's own commands in this scenario, as `voice_commands.json` has them.
+    #[serde(default)]
+    custom: Vec<CustomCommand>,
     expect: Expect,
+}
+
+#[derive(Deserialize)]
+struct CustomCommand {
+    id: String,
+    description: String,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Expect {
     Dictation,
+    /// An instruction for the computer that no listed action does ("turn off
+    /// Wi Fi" with no such action): the answer is none, but it isn't dictation.
+    Unsupported,
     Action {
         action: String,
         app: Option<String>,
@@ -94,7 +106,15 @@ fn rows_for(scenario: &Scenario, stats: &mut Stats) -> Vec<Value> {
         ..Default::default()
     };
     let utterance = scenario.utterance.as_str();
-    let actions = registry::builtin(&ctx);
+    let mut actions = registry::builtin(&ctx);
+    actions.extend(scenario.custom.iter().map(|custom| Action {
+        id: custom.id.clone(),
+        title: custom.id.clone(),
+        what: custom.description.clone(),
+        not_for: None,
+        arg: ArgKind::None,
+        runner: Runner::Shell(String::new()),
+    }));
     let proposal = candidates::propose(utterance, &ctx, Profile::Local);
     let shortlist =
         candidates::shortlist_actions(&actions, utterance, &proposal.menus, LOCAL_MAX_ACTIONS);
@@ -107,6 +127,13 @@ fn rows_for(scenario: &Scenario, stats: &mut Stats) -> Vec<Value> {
             gold.insert("action".into(), one_hot("none"));
             gold.insert("command".into(), one_hot("dictation"));
             stats.add("dictation");
+            out.push(row(&scenario.id, "route", &state, &questions, gold));
+            return out;
+        }
+        Expect::Unsupported => {
+            gold.insert("action".into(), one_hot("none"));
+            gold.insert("command".into(), one_hot("command"));
+            stats.add("unsupported command");
             out.push(row(&scenario.id, "route", &state, &questions, gold));
             return out;
         }

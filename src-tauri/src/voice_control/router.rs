@@ -265,6 +265,29 @@ fn is_pointer_click(utterance: &str) -> bool {
     )
 }
 
+/// A small model asked "which app?" always names one, even when the utterance
+/// named none ("turn off Wi Fi" became "quit MacWhisper"). An action that acts
+/// on an app only runs if that app was actually spoken; otherwise it has no
+/// app and is reported as not understood, rather than guessed at.
+fn require_spoken_app(route: &mut Route, utterance: &str, actions: &[Action]) {
+    let takes_app = route
+        .action
+        .as_ref()
+        .and_then(|id| actions.iter().find(|action| &action.id == id))
+        .is_some_and(|action| action.arg == ArgKind::App);
+    if !takes_app {
+        return;
+    }
+    if !route
+        .app
+        .as_deref()
+        .is_some_and(|app| candidates::app_was_spoken(app, utterance))
+    {
+        route.app = None;
+        route.text = None;
+    }
+}
+
 /// P(command): a server that asks `is_command` answers it directly. A local
 /// one is read off the action question, as the probability that the answer
 /// wasn't `none`.
@@ -447,6 +470,7 @@ pub async fn route(
     let mut route = interpret(&response, proposal, started.elapsed());
     if client.profile() == Profile::Local {
         route.is_command = local_gate(&response, utterance);
+        require_spoken_app(&mut route, utterance, actions);
     }
     Ok(route)
 }
@@ -639,6 +663,36 @@ mod tests {
             interpret_target(&response, &labels, Profile::Jev),
             Some(("Octopus (link)".to_string(), 0.95))
         );
+    }
+
+    #[test]
+    fn an_app_nobody_mentioned_is_dropped() {
+        let actions = builtin(&ctx());
+        let route = |app: &str| Route {
+            action: Some("quit_app".into()),
+            app: Some(app.into()),
+            text: Some("Wi Fi off".into()),
+            ..Default::default()
+        };
+        let mut guessed = route("MacWhisper");
+        require_spoken_app(&mut guessed, "Turn the Wi Fi off.", &actions);
+        assert_eq!((guessed.app.clone(), guessed.text.clone()), (None, None));
+        // With no app there is nothing to run: the decision is "not understood".
+        let proposal = proposal();
+        let decision = decide(&guessed, &actions, &proposal, 0.0);
+        assert!(matches!(decision, Decision::Unresolved { .. }));
+
+        let mut said = route("Safari");
+        require_spoken_app(&mut said, "quit Safari please", &actions);
+        assert_eq!(said.app.as_deref(), Some("Safari"));
+        // Actions that take no app are left alone.
+        let mut mute = Route {
+            action: Some("mute".into()),
+            app: Some("Notes".into()),
+            ..Default::default()
+        };
+        require_spoken_app(&mut mute, "mute", &actions);
+        assert_eq!(mute.app.as_deref(), Some("Notes"));
     }
 
     #[test]

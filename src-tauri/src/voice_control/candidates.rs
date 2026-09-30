@@ -264,6 +264,23 @@ fn compact(text: &str) -> String {
         .collect()
 }
 
+/// Whether `app` was actually said in `utterance`: some run of one to three of
+/// its words looks like the app's name, or is a distinctive part of it ("code"
+/// for Visual Studio Code). A model can name an app nobody mentioned, and the
+/// app question has no "none" option, so anything that acts on an app checks.
+pub fn app_was_spoken(app: &str, utterance: &str) -> bool {
+    let app = compact(app);
+    if app.is_empty() {
+        return false;
+    }
+    ngrams(utterance).iter().any(|gram| {
+        let gram = compact(gram);
+        !gram.is_empty()
+            && (strsim::jaro_winkler(&app, &gram) >= 0.85
+                || (gram.len() >= 4 && app.contains(&gram)))
+    })
+}
+
 /// Verb phrases that ask for an app, and the action each one means. Longest first.
 const APP_VERBS: &[(&[&str], &str)] = &[
     (&["take", "me", "to"], "open_app"),
@@ -603,6 +620,20 @@ mod tests {
         assert_eq!(said("safari"), None);
         assert_eq!(said("open"), None);
         assert_eq!(said("Close this tab"), None);
+    }
+
+    #[test]
+    fn an_app_is_only_spoken_if_its_name_is_in_the_utterance() {
+        assert!(app_was_spoken("TextEdit", "open text edit"));
+        assert!(app_was_spoken("Safari", "Quit safari please."));
+        assert!(app_was_spoken("Visual Studio Code", "launch code"));
+        assert!(app_was_spoken("Google Chrome", "hide chrome"));
+        assert!(app_was_spoken("zoom.us", "quit zoom"));
+        // What the model guessed for "turn off Wi Fi".
+        assert!(!app_was_spoken("MacWhisper", "Turn the Wi Fi off."));
+        assert!(!app_was_spoken("WorkingMemory", "Wi Fi off"));
+        assert!(!app_was_spoken("Notes", "turn off bluetooth"));
+        assert!(!app_was_spoken("", "anything"));
     }
 
     fn action(id: &str, title: &str, what: &str, arg: ArgKind) -> Action {
