@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Request microphone access to transcribe audio locally</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Voice commands use this to control apps for you, such as pressing keyboard shortcuts or quitting an app</string>
 </dict>
 </plist>

@@ -1,0 +1,62 @@
+name: "macOS Test Build (unsigned)"
+
+# An unsigned Apple Silicon build of each PR on a fork, on GitHub-hosted
+# runners. Upstream's "PR Test Build" signs with Apple, Azure and updater keys
+# that only upstream has, so it fails on forks.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/fork-macos-build.yml"
+
+concurrency:
+  group: fork-macos-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository != 'cjpais/Handy'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: "macos-26"
+      target: "aarch64-apple-darwin"
+      # build.yml sets APPLE_CERTIFICATE to "" when not signing, and Tauri
+      # tries to import any defined certificate, so skip signing outright.
+      # Updater artifacts must be signed with upstream's private key; skip them.
+      build-args: >-
+        --target aarch64-apple-darwin
+        --no-sign
+        --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      sign-binaries: false
+      asset-prefix: "handy-unsigned"
+      upload-artifacts: true
+
+  # build.yml's zip also holds a loose Handy.app, which loses its executable
+  # bit in the zip. Publish the .dmg on its own, unzipped, so it downloads as a
+  # plain disk image.
+  dmg:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: handy-unsigned-aarch64-apple-darwin
+      - name: Name the disk image after the commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: mv dmg/*.dmg "Handy-unsigned-${SHA::7}-aarch64.dmg"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: Handy-unsigned-*.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
