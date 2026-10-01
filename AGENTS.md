@@ -71,6 +71,7 @@ Handy is a cross-platform desktop speech-to-text application built with Tauri 2.
 - `overlay.rs` - Recording overlay window (platform-specific)
 - `signal_handle.rs` - `send_transcription_input()` reusable function
 - `utils.rs` - Platform detection helpers
+- `voice_control/` - Experimental voice commands (macOS): one TypeSafe Jev request decides whether a short dictation is a command and which action/argument it names; code runs it via AppleScript, `open`, shell, Hammerspoon, the front app's menus (`menus.rs`), or by clicking what's on screen (`elements.rs`); both use the Accessibility API through `ax.rs`. See [VOICE_COMMANDS.md](VOICE_COMMANDS.md)
 
 ### Frontend Structure (src/)
 

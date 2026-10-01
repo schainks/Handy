@@ -12,7 +12,19 @@ import type {
 import i18n, { syncLanguageFromSettings } from "@/i18n";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 
-type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
+type OverlayState =
+  | "recording"
+  | "streaming"
+  | "transcribing"
+  | "processing"
+  | "command";
+
+// What a voice command did (label) and whether it worked; sent from Rust
+// right before the overlay switches to the "command" state.
+interface CommandResult {
+  label: string;
+  ok: boolean;
+}
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
@@ -33,6 +45,10 @@ const RecordingOverlay: React.FC = () => {
   });
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
+  const [commandResult, setCommandResult] = useState<CommandResult>({
+    label: "",
+    ok: true,
+  });
   const [elapsed, setElapsed] = useState(0);
   // Bumped on each new streaming session so the Live card remounts fresh (replays
   // the pop-in, and never animates in from the previous panel's open size).
@@ -94,6 +110,11 @@ const RecordingOverlay: React.FC = () => {
         setCaptureReady(false);
       });
 
+      const unlistenCommand = await listen<CommandResult>(
+        "command-result",
+        (event) => setCommandResult(event.payload),
+      );
+
       const unlistenReady = await listen("recording-ready", () => {
         setElapsed(0);
         setCaptureReady(true);
@@ -124,6 +145,7 @@ const RecordingOverlay: React.FC = () => {
       return () => {
         unlistenShow();
         unlistenHide();
+        unlistenCommand();
         unlistenReady();
         unlistenLevel();
         unlistenStream();
@@ -274,6 +296,51 @@ const RecordingOverlay: React.FC = () => {
                 true,
               )
             : listeningRow(open, true)}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Voice command result: check or warning icon + what ran. Uses the
+  // working pill's width so the label has room.
+  if (state === "command") {
+    return (
+      <div
+        dir={direction}
+        className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      >
+        <div className="scard compact cworking">
+          <div className="sbase">
+            <div className="sbase-l">
+              <span
+                className={`scommand ${commandResult.ok ? "ok" : "failed"}`}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  {commandResult.ok ? (
+                    <path
+                      d="M3.5 8.5 L6.5 11.5 L12.5 4.5"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      fill="none"
+                    />
+                  ) : (
+                    <path
+                      d="M8 3.5 L8 9 M8 12 L8 12.2"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                    />
+                  )}
+                </svg>
+              </span>
+            </div>
+            <span className="swork-label" title={commandResult.label}>
+              {commandResult.label}
+            </span>
+            <div className="sbase-r" />
+          </div>
         </div>
       </div>
     );

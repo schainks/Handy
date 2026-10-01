@@ -6,6 +6,7 @@ export type { OnboardingPreviewStep } from "./debug/OnboardingPreview";
 export { HistorySettings } from "./history/HistorySettings";
 export { AboutSettings } from "./about/AboutSettings";
 export { PostProcessingSettings } from "./post-processing/PostProcessingSettings";
+export { VoiceCommandsSettings } from "./voice-commands/VoiceCommandsSettings";
 export { ModelsSettings } from "./models/ModelsSettings";
 
 // Individual setting components
@@ -23,6 +24,7 @@ export { ShortcutInput } from "./ShortcutInput";
 export { TranslateToEnglish } from "./TranslateToEnglish";
 export { CustomWords } from "./CustomWords";
 export { PostProcessingToggle } from "./PostProcessingToggle";
+export { VoiceCommandsToggle } from "./VoiceCommandsToggle";
 export { PostProcessingSettingsApi } from "./PostProcessingSettingsApi";
 export { PostProcessingSettingsPrompts } from "./PostProcessingSettingsPrompts";
 export { FillerWordRemoval } from "./FillerWordRemoval";

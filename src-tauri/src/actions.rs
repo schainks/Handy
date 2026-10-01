@@ -13,6 +13,7 @@ use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
     self, show_processing_overlay, show_recording_overlay, show_transcribing_overlay,
 };
+use crate::voice_control;
 use crate::TranscriptionCoordinator;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error, warn};
@@ -703,6 +704,13 @@ impl ShortcutAction for TranscribeAction {
                     utils::hide_recording_overlay(&ah);
                     set_tray_state(&ah, TrayIconState::Idle);
                 } else {
+                    // Voice commands: snapshot the desktop (frontmost, running and
+                    // installed apps) while transcription runs, so routing the
+                    // utterance afterwards doesn't wait on it.
+                    let voice_context = voice_control::is_enabled(&get_settings(&ah)).then(|| {
+                        tauri::async_runtime::spawn_blocking(voice_control::DesktopContext::capture)
+                    });
+
                     // Save WAV concurrently with transcription
                     let sample_count = samples.len();
                     let file_name = format!("handy-{}.wav", chrono::Utc::now().timestamp());
@@ -768,23 +776,95 @@ impl ShortcutAction for TranscribeAction {
                                 utils::redact_text(&transcription)
                             );
 
-                            if post_process {
-                                if use_streaming_overlay {
-                                    tm.emit_stream_working(StreamWorkKind::Polishing);
-                                } else {
-                                    show_processing_overlay(&ah);
+                            // Voice commands: Jev decides whether this was an
+                            // instruction for the computer rather than dictation.
+                            let outcome = match voice_context {
+                                Some(context) => {
+                                    let context = context.await.unwrap_or_default();
+                                    let settings = get_settings(&ah);
+                                    let Some(outcome) = complete_unless_cancelled(
+                                        voice_control::handle(
+                                            &ah,
+                                            &settings,
+                                            &transcription,
+                                            context,
+                                        ),
+                                        || rm.was_cancelled_since(cancel_generation),
+                                    )
+                                    .await
+                                    else {
+                                        debug!("Transcription operation cancelled during voice command routing");
+                                        utils::hide_recording_overlay(&ah);
+                                        set_tray_state(&ah, TrayIconState::Idle);
+                                        return;
+                                    };
+                                    outcome
                                 }
-                            }
-                            let Some(processed) = complete_unless_cancelled(
-                                process_transcription_output(&ah, &transcription, post_process),
-                                || rm.was_cancelled_since(cancel_generation),
-                            )
-                            .await
-                            else {
-                                debug!("Transcription operation cancelled during output handling");
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
-                                return;
+                                None => voice_control::Outcome::Dictation,
+                            };
+
+                            // A "type ..." command pastes its own words, unpolished.
+                            let post_process_requested = post_process
+                                && matches!(outcome, voice_control::Outcome::Dictation);
+                            let processed = match outcome {
+                                voice_control::Outcome::Command { summary, error } => {
+                                    // It ran as a command: keep the utterance in
+                                    // history, show what happened, paste nothing.
+                                    match &error {
+                                        None => log::info!(
+                                            "Voice command ran: {}",
+                                            utils::redact_text(&summary)
+                                        ),
+                                        Some(e) => warn!(
+                                            "Voice command '{}' failed: {e}",
+                                            utils::redact_text(&summary)
+                                        ),
+                                    }
+                                    if wav_saved {
+                                        if let Err(err) = hm.save_entry(
+                                            file_name,
+                                            transcription,
+                                            false,
+                                            None,
+                                            None,
+                                        ) {
+                                            error!("Failed to save history entry: {}", err);
+                                        }
+                                    }
+                                    utils::show_command_overlay(&ah, summary, error.is_none());
+                                    set_tray_state(&ah, TrayIconState::Idle);
+                                    return;
+                                }
+                                voice_control::Outcome::TypeText(text) => ProcessedTranscription {
+                                    final_text: text.clone(),
+                                    post_processed_text: Some(text),
+                                    post_process_prompt: None,
+                                },
+                                voice_control::Outcome::Dictation => {
+                                    if post_process {
+                                        if use_streaming_overlay {
+                                            tm.emit_stream_working(StreamWorkKind::Polishing);
+                                        } else {
+                                            show_processing_overlay(&ah);
+                                        }
+                                    }
+                                    let Some(processed) = complete_unless_cancelled(
+                                        process_transcription_output(
+                                            &ah,
+                                            &transcription,
+                                            post_process,
+                                        ),
+                                        || rm.was_cancelled_since(cancel_generation),
+                                    )
+                                    .await
+                                    else {
+                                        debug!("Transcription operation cancelled during output handling");
+                                        utils::hide_recording_overlay(&ah);
+                                        set_tray_state(&ah, TrayIconState::Idle);
+                                        return;
+                                    };
+                                    processed
+                                }
                             };
 
                             if rm.was_cancelled_since(cancel_generation) {
@@ -799,7 +879,7 @@ impl ShortcutAction for TranscribeAction {
                                 if let Err(err) = hm.save_entry(
                                     file_name,
                                     transcription,
-                                    post_process,
+                                    post_process_requested,
                                     processed.post_processed_text.clone(),
                                     processed.post_process_prompt.clone(),
                                 ) {

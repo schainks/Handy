@@ -353,6 +353,35 @@ impl std::ops::DerefMut for SecretMap {
     }
 }
 
+/// A single secret (an API key) that stays out of `Debug` output, like
+/// `SecretMap` does for the post-processing keys.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub(crate) struct SecretString(String);
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("\"\"")
+        } else {
+            f.write_str("[REDACTED]")
+        }
+    }
+}
+
+impl std::ops::Deref for SecretString {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(secret: String) -> Self {
+        Self(secret)
+    }
+}
+
 /* still handy for composing the initial JSON in the store ------------- */
 /// The container-level `serde(default)` (backed by the `Default` impl below)
 /// guarantees every field — including ones added in the future — falls back to
@@ -514,6 +543,27 @@ pub struct AppSettings {
     /// `overlay_position` (position `none` → style `None`).
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
+    /// Experimental (macOS): Jev decides whether each short dictation is a
+    /// command for the computer, and runs it instead of pasting. See
+    /// `voice_control`.
+    #[serde(default)]
+    pub voice_commands_enabled: bool,
+    /// TypeSafe API key for Jev. Falls back to `TYPESAFE_API_KEY` when empty.
+    #[serde(default)]
+    pub voice_commands_api_key: SecretString,
+    #[serde(default = "default_voice_commands_model")]
+    pub voice_commands_model: String,
+    /// Minimum P(command) from Jev before an utterance runs as a command.
+    #[serde(default = "default_voice_commands_threshold")]
+    pub voice_commands_threshold: f64,
+}
+
+fn default_voice_commands_model() -> String {
+    crate::voice_control::DEFAULT_MODEL.to_string()
+}
+
+fn default_voice_commands_threshold() -> f64 {
+    crate::voice_control::DEFAULT_THRESHOLD
 }
 
 fn default_model() -> String {
@@ -970,6 +1020,10 @@ pub fn get_default_settings() -> AppSettings {
         vad_enabled: default_vad_enabled(),
         vad_backend: VadBackend::default(),
         overlay_style: default_overlay_style(),
+        voice_commands_enabled: false,
+        voice_commands_api_key: SecretString::default(),
+        voice_commands_model: default_voice_commands_model(),
+        voice_commands_threshold: default_voice_commands_threshold(),
     }
 }
 

@@ -24,6 +24,7 @@ mod transcription_coordinator;
 mod tray;
 mod tray_i18n;
 mod utils;
+mod voice_control;
 
 pub use cli::CliArgs;
 #[cfg(debug_assertions)]
@@ -763,6 +764,12 @@ pub fn run(cli_args: CliArgs) {
             commands::history::retry_history_entry_transcription,
             commands::history::update_history_limit,
             commands::history::update_recording_retention_period,
+            commands::voice_commands::change_voice_commands_enabled_setting,
+            commands::voice_commands::change_voice_commands_api_key_setting,
+            commands::voice_commands::change_voice_commands_model_setting,
+            commands::voice_commands::change_voice_commands_threshold_setting,
+            commands::voice_commands::get_voice_commands_status,
+            commands::voice_commands::open_voice_commands_file,
             helpers::clamshell::is_laptop,
         ])
         .events(collect_events![

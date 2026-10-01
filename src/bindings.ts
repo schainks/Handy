@@ -907,6 +907,58 @@ async updateRecordingRetentionPeriod(period: string) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
+async changeVoiceCommandsEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_voice_commands_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeVoiceCommandsApiKeySetting(apiKey: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_voice_commands_api_key_setting", { apiKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeVoiceCommandsModelSetting(model: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_voice_commands_model_setting", { model }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeVoiceCommandsThresholdSetting(threshold: number) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_voice_commands_threshold_setting", { threshold }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getVoiceCommandsStatus() : Promise<Result<VoiceCommandsStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_voice_commands_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the custom commands file in the default editor, creating it from a
+ * template first if needed.
+ */
+async openVoiceCommandsFile() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_voice_commands_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Checks if the Mac is a laptop by detecting battery presence
  * 
@@ -1004,7 +1056,21 @@ vad_backend?: VadBackend;
  * not gated on this — that follows model capability. Migrated from the old
  * `overlay_position` (position `none` → style `None`).
  */
-overlay_style?: OverlayStyle }
+overlay_style?: OverlayStyle; 
+/**
+ * Experimental (macOS): Jev decides whether each short dictation is a
+ * command for the computer, and runs it instead of pasting. See
+ * `voice_control`.
+ */
+voice_commands_enabled?: boolean; 
+/**
+ * TypeSafe API key for Jev. Falls back to `TYPESAFE_API_KEY` when empty.
+ */
+voice_commands_api_key?: SecretString; voice_commands_model?: string; 
+/**
+ * Minimum P(command) from Jev before an utterance runs as a command.
+ */
+voice_commands_threshold?: number }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AutoSubmitKey = "enter" | "ctrl_enter" | "cmd_enter"
 export type AvailableAccelerators = { transcribe: string[]; ort: string[]; gpu_devices: GpuDeviceOption[] }
@@ -1079,6 +1145,11 @@ export type PermissionAccess = "allowed" | "denied" | "unknown"
 export type PostProcessProvider = { id: string; label: string; base_url: string; allow_base_url_edit?: boolean; models_endpoint?: string | null; supports_structured_output?: boolean }
 export type RecordingRetentionPeriod = "never" | "preserve_limit" | "days_3" | "weeks_2" | "months_3"
 export type SecretMap = Partial<{ [key in string]: string }>
+/**
+ * A single secret (an API key) that stays out of `Debug` output, like
+ * `SecretMap` does for the post-processing keys.
+ */
+export type SecretString = string
 export type SecureInputStatus = { 
 /**
  * Secure input is currently enabled (live check)
@@ -1171,6 +1242,19 @@ export type Theme = "system" | "light" | "dark"
 export type TranscribeAcceleratorSetting = "auto" | "cpu" | "gpu"
 export type TypingTool = "auto" | "wtype" | "kwtype" | "dotool" | "ydotool" | "xdotool"
 export type VadBackend = "silero" | "earshot"
+export type VoiceCommandsStatus = { 
+/**
+ * Voice commands run actions through macOS automation.
+ */
+supported: boolean; 
+/**
+ * Hammerspoon's `hs` CLI is installed (window tiling and media keys).
+ */
+hammerspoon: boolean; builtin_actions: number; custom_commands: number; 
+/**
+ * Why the custom commands file couldn't be used, if it couldn't.
+ */
+custom_commands_error: string | null; custom_commands_path: string }
 export type WindowsMicrophonePermissionStatus = { supported: boolean; overall_access: PermissionAccess; device_access: PermissionAccess; app_access: PermissionAccess; desktop_app_access: PermissionAccess }
 
 /** tauri-specta globals **/

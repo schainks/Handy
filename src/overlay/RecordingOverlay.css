@@ -441,6 +441,27 @@
   transform: scale(0.95);
 }
 
+/* voice command result — check (ran) or exclamation (failed) + label */
+.scommand {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.scommand svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+.scommand.ok {
+  color: var(--s-accent);
+}
+.scommand.failed {
+  color: var(--color-warning, #e0a030);
+}
+
 /* working state (transcribing / polishing) — spinner + label */
 .sspinner {
   width: 13px;

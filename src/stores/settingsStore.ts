@@ -194,6 +194,14 @@ const settingUpdaters: {
     commands.changeTranscribeGpuDevice(value as string | null),
   extra_recording_buffer_ms: (value) =>
     commands.changeExtraRecordingBufferSetting(value as number),
+  voice_commands_enabled: (value) =>
+    commands.changeVoiceCommandsEnabledSetting(value as boolean),
+  voice_commands_api_key: (value) =>
+    commands.changeVoiceCommandsApiKeySetting(value as string),
+  voice_commands_model: (value) =>
+    commands.changeVoiceCommandsModelSetting(value as string),
+  voice_commands_threshold: (value) =>
+    commands.changeVoiceCommandsThresholdSetting(value as number),
 };
 
 export const useSettingsStore = create<SettingsStore>()(
